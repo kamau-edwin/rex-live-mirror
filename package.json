@@ -1,20 +1,20 @@
 {
-  "name": "@bric/webmunk-live-mirror",
+  "name": "@kamau-edwin/rex-live-mirror",
   "version": "0.0.1",
-  "description": "Webmunk module for capturing Q&A pairs from LLM chatbot platforms.",
+  "description": "Module for capturing Q&A pairs from LLM chatbot platforms.",
   "keywords": [
     "extension",
-    "webmunk",
+    "live-mirror",
     "chatbot",
     "qa-capture",
     "llm"
   ],
-  "author": "Behavioral Research Innovation Center",
+  "author": "",
   "type": "module",
-  "homepage": "https://github.com/bric-digital/webmunk-live-mirror",
+  "homepage": "https://github.com/kamau-edwin/rex-live-mirror",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/bric-digital/webmunk-live-mirror.git"
+    "url": "git+https://github.com/kamau-edwin/rex-live-mirror.git"
   },
   "exports": {
     "./extension": "./src/extension.mts",

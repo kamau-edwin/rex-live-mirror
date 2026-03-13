@@ -1,10 +1,10 @@
-# webmunk-live-mirror
+# rex-live-mirror
 
-BRIC module for capturing Q&A pairs, sources, and interactions from LLM chatbot platforms in real-time.
+Module for capturing Q&A pairs, sources, and interactions from LLM chatbot platforms in real-time.
 
 ## Overview
 
-**webmunk-live-mirror** detects user questions and AI responses across multiple chatbot platforms, automatically extracting:
+**rex-live-mirror** detects user questions and AI responses across multiple chatbot platforms, automatically extracting:
 - **Question & Response pairs** - Full text capture with transaction tracking
 - **Citation sources** - Backend-configurable selector support with cross-question deduplication
 - **Metadata** - Timestamps, URLs, login state, and platform identification
@@ -30,13 +30,13 @@ BRIC module for capturing Q&A pairs, sources, and interactions from LLM chatbot 
 - **Backend configuration** - DOM selectors managed by Django AppConfiguration
 - **Resilient selectors** - Fallbacks + validation for DOM changes
 
-## Integration with Other BRIC Modules
+## Integration with Other Modules
 
-**webmunk-live-mirror** is part of the **webmunk** BRIC ecosystem:
+**rex-live-mirror** integrates with the extension module stack:
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  webmunk-core (Service Worker, Config Management)   │
+│  rex-core (Service Worker, Config Management)       │
 └────────────────┬────────────────────────────────────┘
                  │
     ┌────────────┼────────────┬──────────────────────┐
@@ -49,15 +49,15 @@ BRIC module for capturing Q&A pairs, sources, and interactions from LLM chatbot 
     └──> LLM Capture
          (This module)
          
-    └──> Sends to: webmunk-passive-data-kit
+    └──> Sends to: rex-passive-data-kit
          for PDK server transmission
 ```
 
 **Data Flow**:
-1. **webmunk-live-mirror** detects Q&A + sources on chatbot pages
+1. **rex-live-mirror** detects Q&A + sources on chatbot pages
 2. Formats transaction with metadata
-3. Sends via `chrome.runtime.sendMessage` to **webmunk-core**
-4. **webmunk-passive-data-kit** handles batch transmission to PDK server
+3. Sends via `chrome.runtime.sendMessage` to **rex-core**
+4. **rex-passive-data-kit** handles batch transmission to PDK server
 
 ## Configuration
 
@@ -167,7 +167,7 @@ Add to your extension's `package.json` dependencies:
 ```json
 {
   "dependencies": {
-    "@bric/webmunk-live-mirror": "github:bric-digital/webmunk-live-mirror#main"
+    "@kamau-edwin/rex-live-mirror": "github:kamau-edwin/rex-live-mirror#main"
   }
 }
 ```
