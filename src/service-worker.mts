@@ -9,6 +9,7 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
   private config: any = null
   private chatGPTCaptureManager: ChatGPTCaptureManager | null = null
   private transmittedHashes: Set<string> = new Set() // Track transmitted interactions to prevent duplicates
+  private pendingQuestionByConversation: Map<string, any> = new Map()
 
   constructor() {
     super()
@@ -126,29 +127,98 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
 
     console.log(`[LLM Chatbot] Transmitting ${interactions.length} interactions to PDK`)
 
-    // Format for PDK and mark as transmitted
-    for (const interaction of interactions) {
-      // Mark as transmitted to prevent future duplicates
+    const markTransmitted = (interaction: any) => {
       const hash = this.hashInteraction(interaction)
       this.transmittedHashes.add(hash)
+    }
 
-      // Send to PDK for encryption and transmission
-      // chatbot_name becomes secondary_identifier in PDK (requires backend generator module)
+    const sortedInteractions = [...interactions].sort((a, b) => {
+      const aTs = Number(a?.timestamp ?? 0)
+      const bTs = Number(b?.timestamp ?? 0)
+      return aTs - bTs
+    })
+
+    for (const interaction of sortedInteractions) {
+      const conversationKey = interaction?.conversation_id || '__no_conversation__'
+
+      if (interaction?.type === 'question') {
+        const existingPending = this.pendingQuestionByConversation.get(conversationKey)
+
+        if (existingPending) {
+          // Flush older unanswered question to avoid losing data when a newer question arrives.
+          dispatchEvent({
+            name: 'llm-chatbot-interaction',
+            date: new Date(existingPending.timestamp),
+            chatbot_name: existingPending.source,
+            interaction: {
+              type: existingPending.type,
+              content: existingPending.content,
+              length: existingPending.length,
+              url: existingPending.url,
+              conversation_id: existingPending.conversation_id,
+              sources: existingPending.sources,
+            }
+          })
+
+          markTransmitted(existingPending)
+          console.log(`[LLM Chatbot] Dispatched pending question from ${existingPending.source} (conversation: ${existingPending.conversation_id})`)
+        }
+
+        this.pendingQuestionByConversation.set(conversationKey, interaction)
+        continue
+      }
+
+      if (interaction?.type === 'response') {
+        const pendingQuestion = this.pendingQuestionByConversation.get(conversationKey)
+
+        if (pendingQuestion) {
+          // Emit a combined Q/A event for live capture.
+          dispatchEvent({
+            name: 'llm-chatbot-interaction',
+            date: new Date(interaction.timestamp),
+            chatbot_name: interaction.source,
+            interaction: {
+              url: interaction.url || pendingQuestion.url,
+              question_timestamp: pendingQuestion.timestamp,
+              response_timestamp: interaction.timestamp,
+              question: {
+                content: pendingQuestion.content,
+                length: pendingQuestion.length,
+              },
+              response: {
+                content: interaction.content,
+                length: interaction.length,
+                sources: interaction.sources,
+              },
+              conversation_id: interaction.conversation_id || pendingQuestion.conversation_id,
+            }
+          })
+
+          markTransmitted(pendingQuestion)
+          markTransmitted(interaction)
+          this.pendingQuestionByConversation.delete(conversationKey)
+
+          console.log(`[LLM Chatbot] Dispatched combined qa_pair from ${interaction.source} (conversation: ${interaction.conversation_id})`)
+          continue
+        }
+      }
+
+      // Fallback path when an interaction cannot be paired.
       dispatchEvent({
         name: 'llm-chatbot-interaction',
         date: new Date(interaction.timestamp),
-        chatbot_name: interaction.source,  // Secondary identifier: chatgpt, perplexity, claude, gemini
+        chatbot_name: interaction.source,
         interaction: {
           type: interaction.type,
           content: interaction.content,
           length: interaction.length,
           url: interaction.url,
           conversation_id: interaction.conversation_id,
-          sources: interaction.sources,  // Include extracted citation sources
-        },
-        data_source: 'extension_chatgpt_capture'
+          sources: interaction.sources,
+        }
       })
 
+      markTransmitted(interaction)
       console.log(`[LLM Chatbot] Dispatched ${interaction.type} from ${interaction.source} to PDK (conversation: ${interaction.conversation_id})`)
     }
 
@@ -360,8 +430,7 @@ class ChatGPTCaptureManager {
     dispatchEvent({
       name: 'webmunk-live-mirror',
       chatbot_name: data.platform,  // Secondary identifier: chatgpt, perplexity, etc.
-      ...data,
-      data_source: 'extension_chatgpt_capture'
+      ...data
     })
   }
 
