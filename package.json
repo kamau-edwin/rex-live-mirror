@@ -1,5 +1,5 @@
 {
-  "name": "@kamau-edwin/rex-live-mirror",
+  "name": "@bric/rex-live-mirror",
   "version": "0.0.1",
   "description": "Module for capturing Q&A pairs from LLM chatbot platforms.",
   "keywords": [
@@ -9,7 +9,7 @@
     "qa-capture",
     "llm"
   ],
-  "author": "",
+  "author": "Kamau Edwin and BRIC",
   "type": "module",
   "homepage": "https://github.com/kamau-edwin/rex-live-mirror",
   "repository": {
