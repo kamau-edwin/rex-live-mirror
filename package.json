@@ -1,0 +1,40 @@
+{
+  "name": "@bric/rex-live-mirror",
+  "version": "0.0.1",
+  "description": "Module for capturing Q&A pairs from LLM chatbot platforms.",
+  "keywords": [
+    "extension",
+    "live-mirror",
+    "chatbot",
+    "qa-capture",
+    "llm"
+  ],
+  "author": "Kamau Edwin and BRIC",
+  "type": "module",
+  "homepage": "https://github.com/kamau-edwin/rex-live-mirror",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kamau-edwin/rex-live-mirror.git"
+  },
+  "exports": {
+    "./extension": "./src/extension.mts",
+    "./browser": "./src/browser.mts",
+    "./service-worker": "./src/service-worker.mts",
+    "./chatbots/chatgpt": "./src/chatbots/chatgpt.ts",
+    "./chatbots/perplexity": "./src/chatbots/perplexity.ts"
+  },
+  "scripts": {
+    "lint": "eslint src"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/chrome": "^0.0.275",
+    "eslint": "^9.39.0",
+    "jiti": "^2.6.1",
+    "typescript": "^5.3.3",
+    "typescript-eslint": "^8.13.0"
+  },
+  "dependencies": {
+    "@bric/rex-core": "github:kamau-edwin/rex-core#main"
+  }
+}
