@@ -121,6 +121,54 @@ test.describe('Service Worker -- LLM Chatbot Interactions', () => {
     expect(llmEvents.length).toBe(1)
   })
 
+  test('deduplicates completed qa_pair across repeated batches', async ({ page }) => {
+    await page.evaluate(async () => {
+      (window as any).__capturedEvents = []
+
+      const question = {
+        interaction_id: 'qa-q-1',
+        source: 'gemini',
+        timestamp: Date.now(),
+        type: 'question',
+        content: 'is argentina a democracy',
+        length: 23,
+        url: 'https://gemini.google.com/app/test',
+        conversation_id: 'local-dup-qa',
+      }
+
+      const response = {
+        interaction_id: 'qa-r-1',
+        source: 'gemini',
+        timestamp: Date.now() + 100,
+        type: 'response',
+        content: 'Yes, Argentina is a democracy.',
+        length: 30,
+        url: 'https://gemini.google.com/app/test',
+        conversation_id: 'local-dup-qa',
+        sources: [],
+      }
+
+      await (window as any).__sendMessage({
+        messageType: 'llmInteractionsBatch',
+        interactions: [question, response],
+      })
+
+      // Same completed pair delivered again in a later upload batch.
+      await (window as any).__sendMessage({
+        messageType: 'llmInteractionsBatch',
+        interactions: [
+          { ...question, interaction_id: 'qa-q-2', timestamp: question.timestamp + 1000 },
+          { ...response, interaction_id: 'qa-r-2', timestamp: response.timestamp + 1000 },
+        ],
+      })
+    })
+
+    const events = await page.evaluate(() => (window as any).__capturedEvents)
+    const llmEvents = events.filter((e: any) => e.name === 'llm-chatbot-interaction')
+    expect(llmEvents.length).toBe(1)
+    expect(llmEvents[0].interaction?.question?.content).toBe('is argentina a democracy')
+  })
+
   test('returns false for unknown message types', async ({ page }) => {
     // Unknown messages are not handled by the module (handleMessage returns false).
     // rex-core's dispatch never calls sendResponse for unhandled messages, so

@@ -9,6 +9,9 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
   private config: any = null
   private chatGPTCaptureManager: ChatGPTCaptureManager | null = null
   private transmittedHashes: Set<string> = new Set() // Track transmitted interactions to prevent duplicates
+  private transmittedQaHashes: Set<string> = new Set() // Track emitted Q&A pairs across uploads/restarts
+  private readonly QA_HASH_STORAGE_KEY: string = 'llm_transmitted_qa_hashes'
+  private readonly QA_HASH_MAX_SIZE: number = 1000
   private pendingQuestionByConversation: Map<string, any> = new Map()
 
   constructor() {
@@ -33,6 +36,19 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
           this.config = llmConfig
           console.log('[LLM Chatbot] Service Worker module enabled')
           console.log('[LLM Chatbot] LLM Capture Config:', llmConfig)
+
+          // Load previously emitted Q&A hashes so dedupe survives service worker restarts.
+          chrome.storage.local.get(this.QA_HASH_STORAGE_KEY, (storageResult) => {
+            const persisted = storageResult[this.QA_HASH_STORAGE_KEY]
+            if (Array.isArray(persisted)) {
+              this.transmittedQaHashes = new Set(
+                persisted
+                  .filter((value) => typeof value === 'string')
+                  .slice(-this.QA_HASH_MAX_SIZE)
+              )
+              console.log(`[LLM Chatbot] Restored ${this.transmittedQaHashes.size} Q&A hashes from storage`)
+            }
+          })
 
           // Initialize ChatGPT capture manager
           if (llmConfig.platforms?.chatgpt?.enabled) {
@@ -98,6 +114,29 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
     return `${interaction.type}:${conversationId}:${contentPrefix}`
   }
 
+  /**
+   * Build a stable fingerprint for completed Q&A payloads.
+   * Conversation IDs can transition from local-* to server IDs, so hash is content-centric.
+   */
+  private hashQaPair(question: any, response: any): string {
+    const normalize = (value: unknown): string =>
+      String(value || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .substring(0, 500)
+
+    return [
+      String(response?.source || question?.source || ''),
+      normalize(question?.content),
+      normalize(response?.content),
+    ].join('|')
+  }
+
+  private persistQaHashes(): void {
+    const serialized = Array.from(this.transmittedQaHashes).slice(-this.QA_HASH_MAX_SIZE)
+    chrome.storage.local.set({ [this.QA_HASH_STORAGE_KEY]: serialized })
+  }
+
   private handleInteractionBatch(interactions: any[]): void {
     console.log(`[LLM Chatbot] Service Worker received batch of ${interactions.length} interactions`)
 
@@ -151,6 +190,16 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
         const pendingQuestion = this.pendingQuestionByConversation.get(conversationKey)
 
         if (pendingQuestion) {
+          const qaHash = this.hashQaPair(pendingQuestion, interaction)
+
+          if (this.transmittedQaHashes.has(qaHash)) {
+            markTransmitted(pendingQuestion)
+            markTransmitted(interaction)
+            this.pendingQuestionByConversation.delete(conversationKey)
+            console.log(`[LLM Chatbot] Skipped duplicate qa_pair from ${interaction.source} (conversation: ${interaction.conversation_id})`)
+            continue
+          }
+
           // Emit a combined Q/A event for live capture.
           dispatchEvent({
             name: 'llm-chatbot-interaction',
@@ -176,6 +225,14 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
           markTransmitted(pendingQuestion)
           markTransmitted(interaction)
           this.pendingQuestionByConversation.delete(conversationKey)
+          this.transmittedQaHashes.add(qaHash)
+          if (this.transmittedQaHashes.size > this.QA_HASH_MAX_SIZE) {
+            const oldest = this.transmittedQaHashes.values().next().value
+            if (oldest) {
+              this.transmittedQaHashes.delete(oldest)
+            }
+          }
+          this.persistQaHashes()
 
           console.log(`[LLM Chatbot] Dispatched combined qa_pair from ${interaction.source} (conversation: ${interaction.conversation_id})`)
           continue
