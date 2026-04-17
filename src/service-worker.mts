@@ -202,7 +202,7 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
 
           // Emit a combined Q/A event for live capture.
           dispatchEvent({
-            name: 'llm-chatbot-interaction',
+            name: 'chatbot-interaction',
             date: new Date(interaction.timestamp),
             chatbot_name: interaction.source,
             interaction: {
