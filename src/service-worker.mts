@@ -142,28 +142,7 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
       const conversationKey = interaction?.conversation_id || '__no_conversation__'
 
       if (interaction?.type === 'question') {
-        const existingPending = this.pendingQuestionByConversation.get(conversationKey)
-
-        if (existingPending) {
-          // Flush older unanswered question to avoid losing data when a newer question arrives.
-          dispatchEvent({
-            name: 'llm-chatbot-interaction',
-            date: new Date(existingPending.timestamp),
-            chatbot_name: existingPending.source,
-            interaction: {
-              type: existingPending.type,
-              content: existingPending.content,
-              length: existingPending.length,
-              url: existingPending.url,
-              conversation_id: existingPending.conversation_id,
-              sources: existingPending.sources,
-            }
-          })
-
-          markTransmitted(existingPending)
-          console.log(`[LLM Chatbot] Dispatched pending question from ${existingPending.source} (conversation: ${existingPending.conversation_id})`)
-        }
-
+        // Keep only the latest pending question per conversation and dispatch only with a response.
         this.pendingQuestionByConversation.set(conversationKey, interaction)
         continue
       }
@@ -201,25 +180,16 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
           console.log(`[LLM Chatbot] Dispatched combined qa_pair from ${interaction.source} (conversation: ${interaction.conversation_id})`)
           continue
         }
+
+        // Complete Q&A mode: skip unpaired responses.
+        markTransmitted(interaction)
+        console.log(`[LLM Chatbot] Skipped unpaired response from ${interaction.source} (conversation: ${interaction.conversation_id})`)
+        continue
       }
 
-      // Fallback path when an interaction cannot be paired.
-      dispatchEvent({
-        name: 'llm-chatbot-interaction',
-        date: new Date(interaction.timestamp),
-        chatbot_name: interaction.source,
-        interaction: {
-          type: interaction.type,
-          content: interaction.content,
-          length: interaction.length,
-          url: interaction.url,
-          conversation_id: interaction.conversation_id,
-          sources: interaction.sources,
-        }
-      })
-
+      // Complete Q&A mode: mark unpaired interactions as handled without dispatch.
       markTransmitted(interaction)
-      console.log(`[LLM Chatbot] Dispatched ${interaction.type} from ${interaction.source} to PDK (conversation: ${interaction.conversation_id})`)
+      console.log(`[LLM Chatbot] Skipped unpaired ${interaction.type} from ${interaction.source} (conversation: ${interaction.conversation_id})`)
     }
 
     // Clear storage (browser module may have stored these)

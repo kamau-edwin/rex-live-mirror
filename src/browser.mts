@@ -214,6 +214,27 @@ class LLMChatbotBrowserModule extends REXClientModule {
   }
 
   /**
+   * Keep only terminal interactions from update chains.
+   * Any interaction referenced by updates_interaction_id is superseded.
+   */
+  private collapseSupersededInteractions(interactions: LLMInteraction[]): LLMInteraction[] {
+    if (interactions.length === 0) {
+      return interactions
+    }
+
+    const supersededIds = new Set<string>()
+    for (const interaction of interactions) {
+      if (interaction.updates_interaction_id) {
+        supersededIds.add(interaction.updates_interaction_id)
+      }
+    }
+
+    return interactions
+      .filter((interaction) => !supersededIds.has(interaction.interaction_id))
+      .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0))
+  }
+
+  /**
    * Extract conversation/search ID from chatbot URLs
    * - ChatGPT: chatgpt.com/c/{conversation-id} (UUID format)
    * - Perplexity: perplexity.ai/search/{query-slug}-{search-id} (base64-like ID at end)
@@ -394,6 +415,15 @@ class LLMChatbotBrowserModule extends REXClientModule {
       let newCaptureCount = 0
       let updateCount = 0
       for (const interaction of newInteractions) {
+        // For parsers that support completion checks (Gemini), avoid partial response capture.
+        if (
+          interaction.type === 'response' &&
+          typeof this.parser.isResponseComplete === 'function' &&
+          !this.parser.isResponseComplete()
+        ) {
+          continue
+        }
+
         // Generate prefix key for this content
         const prefixKey = this.getPrefixKey(interaction.content, interaction.type)
         const currentLength = interaction.content.length
@@ -522,11 +552,19 @@ class LLMChatbotBrowserModule extends REXClientModule {
         return
       }
 
+      const finalizedInteractions = this.collapseSupersededInteractions(readyToTransmit)
+
+      if (finalizedInteractions.length !== readyToTransmit.length) {
+        console.log(
+          `[LLM Chatbot Browser] Collapsed ${readyToTransmit.length - finalizedInteractions.length} superseded interactions before transmission`,
+        )
+      }
+
       // Get batch to transmit (respect batch size)
-      const batch = readyToTransmit.slice(0, this.batchSize)
+      const batch = finalizedInteractions.slice(0, this.batchSize)
       // Put any overflow back into the queue (at the front, since they're ready)
-      if (readyToTransmit.length > this.batchSize) {
-        this.interactions = [...readyToTransmit.slice(this.batchSize), ...this.interactions]
+      if (finalizedInteractions.length > this.batchSize) {
+        this.interactions = [...finalizedInteractions.slice(this.batchSize), ...this.interactions]
       }
 
       console.log(`[LLM Chatbot Browser] Transmitting batch of ${batch.length} interactions via message (${needsBackfill.length} waiting for ID)`)
