@@ -59,10 +59,24 @@ export class ChatGPTParser {
 
     // Find all assistant messages using config selector
     if (this.selectors.assistantMessage) {
-      const assistantMessages = document.querySelectorAll(this.selectors.assistantMessage)
-      console.log(`[ChatGPTParser] Found ${assistantMessages.length} assistant message elements`)
-      assistantMessages.forEach((msg) => {
-        const content = msg.textContent?.trim()
+      const assistantMessageContainers = document.querySelectorAll(this.selectors.assistantMessage)
+      console.log(`[ChatGPTParser] Found ${assistantMessageContainers.length} assistant message elements`)
+      
+      assistantMessageContainers.forEach((container) => {
+        // Drill down to .markdown.prose for clean content extraction
+        // This avoids capturing buttons, labels, and other UI elements
+        const proseElement = container.querySelector('.markdown.prose, .markdown')
+        let content: string | null = null
+        
+        if (proseElement) {
+          content = proseElement.textContent?.trim()
+          console.log('[ChatGPTParser] Extracted content from .markdown element')
+        } else {
+          // Fallback to container textContent if .markdown not found
+          content = container.textContent?.trim()
+          console.log('[ChatGPTParser] No .markdown element found, using container textContent')
+        }
+        
         if (content && content.length > 0) {
           interactions.push({
             type: 'response',
@@ -92,6 +106,46 @@ export class ChatGPTParser {
     }
 
     return interactions
+  }
+
+  /**
+   * Check if the latest response is still streaming or complete
+   * Returns true if response is finished (safe to capture)
+   * Returns false if response is still being generated
+   * 
+   * ChatGPT uses:
+   * - "Stop generating" button visible while streaming
+   * - aria-busy attribute on assistant message
+   * - data-writing-block on the response section
+   */
+  isResponseComplete(): boolean {
+    // Method 1: Check for "Stop generating" button (indicates streaming in progress)
+    const stopButton = document.querySelector('button[aria-label="Stop generating"]')
+    if (stopButton) {
+      console.log('[ChatGPTParser] Response still streaming - "Stop generating" button detected')
+      return false
+    }
+
+    // Method 2: Check for aria-busy on the latest assistant message
+    const latestAssistantMsg = document.querySelector('[data-message-author-role="assistant"]:last-of-type')
+    if (latestAssistantMsg) {
+      const ariaBusy = latestAssistantMsg.getAttribute('aria-busy')
+      if (ariaBusy === 'true') {
+        console.log('[ChatGPTParser] Response still streaming - aria-busy="true" detected')
+        return false
+      }
+    }
+
+    // Method 3: Check for data-writing-block on response section (ChatGPT streaming indicator)
+    const writingBlock = document.querySelector('[data-writing-block]')
+    if (writingBlock) {
+      console.log('[ChatGPTParser] Response still streaming - data-writing-block detected')
+      return false
+    }
+
+    // Response appears complete
+    console.log('[ChatGPTParser] Response appears complete')
+    return true
   }
 
   /**
