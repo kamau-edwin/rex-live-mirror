@@ -39,9 +39,6 @@ export interface ChatGPTConfig {
 export class ChatGPTParser {
   name = 'chatgpt'
   selectors: ChatGPTSelectors
-  private lastResponseSnapshot = ''
-  private stableResponseChecks = 0
-
   constructor(config?: ChatGPTConfig) {
     this.selectors = config?.selectors || {
       userMessage: '[data-message-author-role="user"]',
@@ -155,19 +152,6 @@ export class ChatGPTParser {
     if (!hasCopyResponseButton && hasAnyCopyResponseButton) {
       console.log('[ChatGPTParser] Response incomplete - latest turn copy button not available yet')
       return false
-    }
-
-    if (latestContent === this.lastResponseSnapshot) {
-      this.stableResponseChecks += 1
-    } else {
-      this.lastResponseSnapshot = latestContent
-
-      // ChatGPT UI variants can mutate non-content DOM text even after generation
-      // completes. Keep tracking changes, but do not hard-block dispatch forever.
-      if (this.stableResponseChecks === 0) {
-        this.stableResponseChecks = 1
-        console.log('[ChatGPTParser] Response changed - allowing capture after completion markers')
-      }
     }
 
     if (/\n\s*\d+\.\s*$/.test(latestContent)) {

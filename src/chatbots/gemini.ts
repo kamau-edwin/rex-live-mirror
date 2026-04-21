@@ -181,7 +181,16 @@ export class GeminiParser {
     }
 
     const responseContainers = document.querySelectorAll(responseContainerSelector)
-    const currentResponseId = responseContainers.length > 0 ? `${responseContainers.length}` : undefined
+    const latestResponseContainer =
+      responseContainers.length > 0 ? (responseContainers[responseContainers.length - 1] as Element) : undefined
+    const latestResponseContainerId =
+      latestResponseContainer?.getAttribute('data-turn-id') ||
+      latestResponseContainer?.getAttribute('id') ||
+      latestResponseContainer?.getAttribute('data-testid') ||
+      undefined
+    const currentResponseId = latestResponseContainer
+      ? `${responseContainers.length}:${latestResponseContainerId || 'latest'}`
+      : undefined
 
     // Skip if we've already extracted sources for this response
     if (currentResponseId === this.lastExtractedResponseId) {
@@ -328,6 +337,13 @@ export class GeminiParser {
       return true
     }
 
+    const queryWithinLatestTurn = (selector: string): Element[] => {
+      if (!latestResponseContainer) {
+        return []
+      }
+      return Array.from(latestResponseContainer.querySelectorAll(selector))
+    }
+
     const closeSourcesPanel = (): void => {
       const closeSelector = this.selectors.sourceCloseButton
       if (!closeSelector) {
@@ -352,11 +368,12 @@ export class GeminiParser {
       }, 200)
     }
 
-    // Prefer explicit source links when present.
+    // Prefer explicit source links when present (scoped to latest response turn).
     const sourceAnchorSelector = this.selectors.sourceAnchors
+    let latestTurnSourceAnchors: Element[] = []
     if (sourceAnchorSelector) {
-      const sourceAnchors = document.querySelectorAll(sourceAnchorSelector)
-      sourceAnchors.forEach((anchor) => {
+      latestTurnSourceAnchors = queryWithinLatestTurn(sourceAnchorSelector)
+      latestTurnSourceAnchors.forEach((anchor) => {
         const url = normalizeSourceUrl(anchor.getAttribute('href'))
         if (!url) {
           return
@@ -370,6 +387,19 @@ export class GeminiParser {
       })
     } else {
       console.warn('[GeminiParser] Missing config selector: sourceAnchors')
+    }
+
+    // Source chips/buttons are also scoped to latest response turn.
+    const sourceButtonSelector = this.selectors.sourceButtons
+    const latestTurnSourceButtons = sourceButtonSelector ? queryWithinLatestTurn(sourceButtonSelector) : []
+
+    // If latest turn has no source affordance, do not read side panel anchors (which can be stale).
+    const hasSourceAffordanceInLatestTurn =
+      latestTurnSourceAnchors.length > 0 || latestTurnSourceButtons.length > 0
+    if (!hasSourceAffordanceInLatestTurn) {
+      console.log('[GeminiParser] Latest response has no source affordance; returning empty sources for this turn')
+      this.lastExtractedResponseId = currentResponseId
+      return []
     }
 
     // Additional source detail links are often rendered in side panels.
@@ -419,10 +449,8 @@ export class GeminiParser {
 
     // Fallback: capture source chip labels even when URL is not directly exposed.
     // NOTE: Exclude the toggle button (.legacy-sources-sidebar-button) — it's a control, not a source
-    const sourceButtonSelector = this.selectors.sourceButtons
     if (sourceButtonSelector) {
-      const sourceButtons = document.querySelectorAll(sourceButtonSelector)
-      sourceButtons.forEach((button, index) => {
+      latestTurnSourceButtons.forEach((button, index) => {
         const text = button.textContent?.replace(/\s+/g, ' ').trim() || ''
         const aria = button.getAttribute('aria-label')?.trim() || ''
         const label = text || aria || `source-${index + 1}`
