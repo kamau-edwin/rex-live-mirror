@@ -291,7 +291,7 @@ export class ChatGPTParser {
       const url = normalizeSourceUrl(element.getAttribute('href'))
       if (!url || shouldSkipUrl(url)) return
 
-      let title = element.textContent?.trim()
+      let title: string | undefined = element.textContent?.trim()
       if (title) {
         title = title.replace(/\s+/g, ' ').substring(0, 200)
       }

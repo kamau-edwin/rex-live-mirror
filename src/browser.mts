@@ -50,6 +50,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
   private lastCheckedUrl: string = ''  // Track URL to detect changes
   private localSessionId: string | undefined = undefined  // Self-generated ID for logged-out sessions
   private hadMessagesInDOM: boolean = false  // Track if we previously had messages (for new conversation detection)
+  private lastSelectorDiagnosticFingerprint: string = ''
 
   constructor() {
     super()
@@ -138,16 +139,53 @@ class LLMChatbotBrowserModule extends REXClientModule {
         console.log(`[LLM Chatbot Browser] Parser initialized: ${this.parser.name}`)
         console.log(`[LLM Chatbot Browser] Parser selectors:`, this.parser.selectors || 'default')
         
-        // Run selector validation for Perplexity parser if available
+        // Run selector validation for parser if available
         if (typeof this.parser.validateSelectors === 'function') {
           const validation = this.parser.validateSelectors()
           console.log(`[LLM Chatbot Browser] Selector validation: valid=${validation.valid}, questions=${validation.questionsFound}, responses=${validation.responsesFound}`)
+          if (!validation.valid || (Array.isArray(validation.failures) && validation.failures.length > 0)) {
+            this.reportSelectorDiagnostics(validation)
+          }
         }
         
         this.startCapture()
       }
     } catch (error) {
       console.error('[LLM Chatbot Browser] Error initializing chatbot capture:', error)
+    }
+  }
+
+  private reportSelectorDiagnostics(validation: any): void {
+    try {
+      const payload = {
+        source: this.parser?.name || 'unknown',
+        url: window.location.href,
+        timestamp: Date.now(),
+        selectors: this.parser?.selectors || {},
+        validation,
+      }
+
+      const fingerprint = JSON.stringify({
+        source: payload.source,
+        url: payload.url,
+        failures: validation?.failures || [],
+      })
+
+      if (fingerprint === this.lastSelectorDiagnosticFingerprint) {
+        return
+      }
+
+      this.lastSelectorDiagnosticFingerprint = fingerprint
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(chrome.runtime.sendMessage as any)({
+        messageType: 'llmSelectorDiagnostics',
+        payload,
+      })
+
+      console.warn('[LLM Chatbot Browser] Reported selector diagnostics:', payload)
+    } catch (error) {
+      console.error('[LLM Chatbot Browser] Failed to report selector diagnostics:', error)
     }
   }
 
