@@ -38,11 +38,8 @@ export class GeminiParser {
   private lastExtractedResponseId: string | undefined = undefined
 
   constructor(config?: GeminiConfig) {
-    // Use config selectors or defaults
-    this.selectors = config?.selectors || {
-      userMessage: '[data-text-user-message]',
-      assistantMessage: '[data-text-assistant-message]',
-    }
+    // Config-only selectors: missing values are handled with warnings at call sites.
+    this.selectors = config?.selectors || {}
     console.log('[GeminiParser] Initialized with selectors:', this.selectors)
   }
 
@@ -89,15 +86,32 @@ export class GeminiParser {
   }
 
   isResponseComplete(): boolean {
-    const responseContainers = document.querySelectorAll('.conversation-container model-response')
+    const responseContainerSelector = this.selectors.responseContainer
+    if (!responseContainerSelector) {
+      console.warn('[GeminiParser] Missing config selector: responseContainer')
+      return false
+    }
+
+    const responseContainers = document.querySelectorAll(responseContainerSelector)
     if (responseContainers.length === 0) {
       return false
     }
 
     const latest = responseContainers[responseContainers.length - 1]
-    const hasCompleteFooter = latest.querySelector('.response-footer.gap.complete') !== null
-    const hasCopyAction = latest.querySelector('message-actions button[data-test-id="copy-button"]') !== null
-    const isBusy = latest.querySelector('.markdown.markdown-main-panel[aria-busy="true"]') !== null
+    const completeFooterSelector = this.selectors.completeFooter
+    const copyActionSelector = this.selectors.copyAction
+    const busyIndicatorSelector = this.selectors.busyIndicator
+
+    if (!completeFooterSelector || !copyActionSelector || !busyIndicatorSelector) {
+      console.warn(
+        '[GeminiParser] Missing config selectors required for completion check: completeFooter, copyAction, busyIndicator',
+      )
+      return false
+    }
+
+    const hasCompleteFooter = latest.querySelector(completeFooterSelector) !== null
+    const hasCopyAction = latest.querySelector(copyActionSelector) !== null
+    const isBusy = latest.querySelector(busyIndicatorSelector) !== null
 
     if (hasCompleteFooter) {
       return true
@@ -108,7 +122,13 @@ export class GeminiParser {
 
   extractSources(): ExtractedSource[] {
     // Get current response ID to detect if we're processing a new response
-    const responseContainers = document.querySelectorAll('.conversation-container model-response')
+    const responseContainerSelector = this.selectors.responseContainer
+    if (!responseContainerSelector) {
+      console.warn('[GeminiParser] Missing config selector: responseContainer')
+      return []
+    }
+
+    const responseContainers = document.querySelectorAll(responseContainerSelector)
     const currentResponseId = responseContainers.length > 0 ? `${responseContainers.length}` : undefined
 
     // Skip if we've already extracted sources for this response
@@ -232,7 +252,11 @@ export class GeminiParser {
     }
 
     const maybeOpenSourcesPanel = (): boolean => {
-      const toggleSelector = this.selectors.sourceToggleButton || '.legacy-sources-sidebar-button'
+      const toggleSelector = this.selectors.sourceToggleButton
+      if (!toggleSelector) {
+        console.warn('[GeminiParser] Missing config selector: sourceToggleButton')
+        return false
+      }
       const toggle = document.querySelector(toggleSelector) as HTMLElement | null
       if (!toggle) {
         console.warn(`[GeminiParser] Toggle button not found with selector: ${toggleSelector}`)
@@ -253,24 +277,17 @@ export class GeminiParser {
     }
 
     const closeSourcesPanel = (): void => {
+      const closeSelector = this.selectors.sourceCloseButton
+      if (!closeSelector) {
+        console.warn('[GeminiParser] Missing config selector: sourceCloseButton')
+        return
+      }
+
       // Add a small delay to ensure panel DOM is fully rendered
       setTimeout(() => {
-        // Try multiple close button selectors for robustness
-        const selectors = [
-          'context-sidebar button[data-test-id="close-button"]',
-          'context-sidebar button[aria-label="Close sidebar"]',
-          'context-sidebar button[aria-label*="close" i]',
-          '.legacy-sources-sidebar button[aria-label*="close" i]',
-          'button[data-test-id="close-button"]',
-        ]
-
-        let closeButton: HTMLElement | null = null
-        for (const selector of selectors) {
-          closeButton = document.querySelector(selector) as HTMLElement | null
-          if (closeButton) {
-            console.log(`[GeminiParser] Found close button with selector: ${selector}`)
-            break
-          }
+        const closeButton = document.querySelector(closeSelector) as HTMLElement | null
+        if (closeButton) {
+          console.log(`[GeminiParser] Found close button with selector: ${closeSelector}`)
         }
 
         if (!closeButton) {
@@ -284,30 +301,36 @@ export class GeminiParser {
     }
 
     // Prefer explicit source links when present.
-    const sourceAnchorSelector =
-      this.selectors.sourceAnchors || '.conversation-container model-response a[href^="http"]'
-    const sourceAnchors = document.querySelectorAll(sourceAnchorSelector)
-    sourceAnchors.forEach((anchor) => {
-      const url = normalizeSourceUrl(anchor.getAttribute('href'))
-      if (!url) {
-        return
-      }
+    const sourceAnchorSelector = this.selectors.sourceAnchors
+    if (sourceAnchorSelector) {
+      const sourceAnchors = document.querySelectorAll(sourceAnchorSelector)
+      sourceAnchors.forEach((anchor) => {
+        const url = normalizeSourceUrl(anchor.getAttribute('href'))
+        if (!url) {
+          return
+        }
 
-      const title =
-        anchor.textContent?.replace(/\s+/g, ' ').trim() ||
-        anchor.getAttribute('aria-label') ||
-        undefined
-      addSource(title, url)
-    })
+        const title =
+          anchor.textContent?.replace(/\s+/g, ' ').trim() ||
+          anchor.getAttribute('aria-label') ||
+          undefined
+        addSource(title, url)
+      })
+    } else {
+      console.warn('[GeminiParser] Missing config selector: sourceAnchors')
+    }
 
     // Additional source detail links are often rendered in side panels.
-    const sourceDetailAnchorSelector =
-      this.selectors.sourceDetailAnchors ||
-      '.legacy-sources-sidebar a[href], .legacy-source-card a[href], [aria-label*="source details" i] a[href]'
-    let sourceDetailAnchors = document.querySelectorAll(sourceDetailAnchorSelector)
-    console.log(
-      `[GeminiParser] Found ${sourceDetailAnchors.length} source detail anchors with selector: ${sourceDetailAnchorSelector}`,
-    )
+    const sourceDetailAnchorSelector = this.selectors.sourceDetailAnchors
+    let sourceDetailAnchors: Element[] = []
+    if (sourceDetailAnchorSelector) {
+      sourceDetailAnchors = Array.from(document.querySelectorAll(sourceDetailAnchorSelector))
+      console.log(
+        `[GeminiParser] Found ${sourceDetailAnchors.length} source detail anchors with selector: ${sourceDetailAnchorSelector}`,
+      )
+    } else {
+      console.warn('[GeminiParser] Missing config selector: sourceDetailAnchors')
+    }
 
     let openedByParser = false
     if (sourceDetailAnchors.length === 0) {
@@ -316,14 +339,17 @@ export class GeminiParser {
       openedByParser = maybeOpenSourcesPanel()
       
       if (openedByParser) {
-        // Wait for panel to render before re-querying
-        console.log('[GeminiParser] Panel opened by parser, detail anchors will be queried on next extraction attempt')
+        // Re-query on the next mutation/render tick to allow panel DOM to populate.
+        console.log('[GeminiParser] Panel opened by parser, deferring source extraction to next tick')
+        return []
       } else {
         // Panel was already open, so query again immediately
-        sourceDetailAnchors = document.querySelectorAll(sourceDetailAnchorSelector)
-        console.log(
-          `[GeminiParser] Panel was already open, found ${sourceDetailAnchors.length} source detail anchors`,
-        )
+        if (sourceDetailAnchorSelector) {
+          sourceDetailAnchors = Array.from(document.querySelectorAll(sourceDetailAnchorSelector))
+          console.log(
+            `[GeminiParser] Panel was already open, found ${sourceDetailAnchors.length} source detail anchors`,
+          )
+        }
       }
     }
     sourceDetailAnchors.forEach((anchor) => {
@@ -341,19 +367,23 @@ export class GeminiParser {
 
     // Fallback: capture source chip labels even when URL is not directly exposed.
     // NOTE: Exclude the toggle button (.legacy-sources-sidebar-button) — it's a control, not a source
-    const sourceButtonSelector =
-      this.selectors.sourceButtons ||
-      '.conversation-container model-response sources-list button, .conversation-container model-response source-inline-chip button, [aria-label*="View source details for citation from"]'
-    const sourceButtons = document.querySelectorAll(sourceButtonSelector)
-    sourceButtons.forEach((button, index) => {
-      const text = button.textContent?.replace(/\s+/g, ' ').trim() || ''
-      const aria = button.getAttribute('aria-label')?.trim() || ''
-      const label = text || aria || `source-${index + 1}`
-      const url = extractUrlFromElement(button)
-      addSource(label, url)
-    })
+    const sourceButtonSelector = this.selectors.sourceButtons
+    if (sourceButtonSelector) {
+      const sourceButtons = document.querySelectorAll(sourceButtonSelector)
+      sourceButtons.forEach((button, index) => {
+        const text = button.textContent?.replace(/\s+/g, ' ').trim() || ''
+        const aria = button.getAttribute('aria-label')?.trim() || ''
+        const label = text || aria || `source-${index + 1}`
+        const url = extractUrlFromElement(button)
+        addSource(label, url)
+      })
+    } else {
+      console.warn('[GeminiParser] Missing config selector: sourceButtons')
+    }
 
-    if (openedByParser && sources.length > 0) {
+    const hasUrlSource = sources.some((source) => !!source.source_url)
+
+    if (openedByParser && hasUrlSource) {
       closeSourcesPanel()
     } else if (openedByParser) {
       console.log('[GeminiParser] Panel opened but no sources found yet - keeping panel open for retry')
@@ -361,15 +391,14 @@ export class GeminiParser {
 
     console.log(`[GeminiParser] Extracted ${sources.length} sources`)
     
-    // Only mark response as "fully processed" if we found sources or didn't need to open panel
-    // If we opened the panel but found nothing, allow re-extraction on next mutation
-    if (sources.length > 0 || !openedByParser) {
+    // Only mark response as complete once we have at least one URL-backed source.
+    if (hasUrlSource) {
       this.lastExtractedResponseId = currentResponseId
       console.log(`[GeminiParser] Response extraction complete (found ${sources.length} sources)`)
     } else {
-      console.log('[GeminiParser] Opened panel but found no sources yet - will retry on next mutation')
+      console.log('[GeminiParser] No URL-backed sources found yet - will retry on next mutation')
     }
-    
+
     return sources
   }
 }
