@@ -39,6 +39,9 @@ export interface ChatGPTConfig {
 export class ChatGPTParser {
   name = 'chatgpt'
   selectors: ChatGPTSelectors
+  private lastResponseSnapshot = ''
+  private stableResponseChecks = 0
+
   constructor(config?: ChatGPTConfig) {
     this.selectors = config?.selectors || {
       userMessage: '[data-message-author-role="user"]',
@@ -151,6 +154,21 @@ export class ChatGPTParser {
     // omit or rename them. Treat absence as non-fatal to avoid blocking dispatch.
     if (!hasCopyResponseButton && hasAnyCopyResponseButton) {
       console.log('[ChatGPTParser] Response incomplete - latest turn copy button not available yet')
+      return false
+    }
+
+    // Track response stability: ensure content isn't still being streamed/mutated
+    if (latestContent === this.lastResponseSnapshot) {
+      this.stableResponseChecks += 1
+    } else {
+      this.lastResponseSnapshot = latestContent
+      this.stableResponseChecks = 0
+      console.log('[ChatGPTParser] Response changed - waiting for stability before capture')
+      return false
+    }
+
+    if (this.stableResponseChecks < 1) {
+      console.log('[ChatGPTParser] Waiting one extra poll for response stability')
       return false
     }
 
