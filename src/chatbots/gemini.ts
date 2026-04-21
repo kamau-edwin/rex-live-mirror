@@ -22,9 +22,25 @@ export interface GeminiSelectors {
   sourceCloseButton?: string
 }
 
+/**
+ * Per-selector fallback arrays. Keys match GeminiSelectors keys.
+ * Used to try alternative selectors when the primary selector yields no results.
+ */
+export type GeminiSelectorFallbacks = Partial<Record<keyof GeminiSelectors, string[]>>
+
+/**
+ * Controls how primary selectors are merged with their fallbacks:
+ *   append  — "primary, fallback1, fallback2"  (CSS union, default)
+ *   replace — first selector (primary or fallback) that matches the DOM wins
+ *   none    — only the primary selector is used; fallbacks are ignored
+ */
+export type GeminiFallbackMode = 'append' | 'replace' | 'none'
+
 export interface GeminiConfig {
   enabled?: boolean
   selectors?: GeminiSelectors
+  fallback_mode?: GeminiFallbackMode
+  selector_fallbacks?: GeminiSelectorFallbacks
 }
 
 export interface ExtractedSource {
@@ -35,12 +51,48 @@ export interface ExtractedSource {
 export class GeminiParser {
   name = 'gemini'
   selectors: GeminiSelectors
+  private fallbackMode: GeminiFallbackMode
+  private selectorFallbacks: GeminiSelectorFallbacks
   private lastExtractedResponseId: string | undefined = undefined
 
   constructor(config?: GeminiConfig) {
     // Config-only selectors: missing values are handled with warnings at call sites.
     this.selectors = config?.selectors || {}
+    this.fallbackMode = config?.fallback_mode || 'append'
+    this.selectorFallbacks = config?.selector_fallbacks || {}
     console.log('[GeminiParser] Initialized with selectors:', this.selectors)
+  }
+
+  /**
+   * Strip the domain + snippet text that Gemini appends to source card titles.
+   * Gemini chip textContent is typically: "SiteName domain.com Page title excerpt..."
+   * When a URL is available we locate its hostname in the title and take only what precedes it.
+   */
+  private stripSnippetFromTitle(title: string, url?: string): string {
+    if (!title) return title
+
+    // Use URL hostname as anchor: take everything before it
+    if (url) {
+      try {
+        const hostname = new URL(url).hostname
+        const hostIdx = title.indexOf(hostname)
+        if (hostIdx > 0) {
+          const beforeHost = title.substring(0, hostIdx).trim()
+          if (beforeHost) return beforeHost
+        }
+      } catch {
+        // fall through
+      }
+    }
+
+    // Fallback: strip from the first domain-like token onward
+    // e.g. "Wikipedia en.wikipedia.org Politics..." → "Wikipedia"
+    const domainBoundary = title.match(/^(.+?)\s+(?:[\w-]+\.)+[a-z]{2,}(?:\s|$)/i)
+    if (domainBoundary) {
+      return domainBoundary[1].trim()
+    }
+
+    return title
   }
 
   private normalizeQuestion(content: string): string {
@@ -381,24 +433,84 @@ export class GeminiParser {
       console.warn('[GeminiParser] Missing config selector: sourceButtons')
     }
 
-    const hasUrlSource = sources.some((source) => !!source.source_url)
+    console.log(`[GeminiParser] Extracted ${sources.length} raw sources before dedup`)
 
-    if (openedByParser && hasUrlSource) {
-      closeSourcesPanel()
-    } else if (openedByParser) {
-      console.log('[GeminiParser] Panel opened but no sources found yet - keeping panel open for retry')
+    // ── Post-processing ──────────────────────────────────────────────────────
+    // Step 1: strip domain + snippet text from titles ("SiteName domain.com excerpt" → "SiteName")
+    const stripped = sources.map((s) => ({
+      ...s,
+      source_title: this.stripSnippetFromTitle(s.source_title, s.source_url),
+    }))
+
+    // Step 2: dedup URL-backed entries by base URL (strip #:~:text= / hash fragments)
+    const getBaseUrl = (url: string): string => {
+      try {
+        const p = new URL(url)
+        return p.origin + p.pathname
+      } catch {
+        return url.split('#')[0]
+      }
     }
 
-    console.log(`[GeminiParser] Extracted ${sources.length} sources`)
-    
+    const seenBaseUrls = new Set<string>()
+    const urlBacked: ExtractedSource[] = []
+    const titleOnly: ExtractedSource[] = []
+
+    for (const s of stripped) {
+      if (s.source_url) {
+        const base = getBaseUrl(s.source_url)
+        if (!seenBaseUrls.has(base)) {
+          seenBaseUrls.add(base)
+          urlBacked.push(s)
+        } else {
+          console.log(`[GeminiParser] Dedup: dropping duplicate base URL ${base}`)
+        }
+      } else {
+        titleOnly.push(s)
+      }
+    }
+
+    // Step 3: drop title-only orphans covered by a URL-backed entry
+    // Build lookup of site names / domains from URL-backed entries
+    const urlBackedNames = new Set<string>()
+    for (const s of urlBacked) {
+      urlBackedNames.add(s.source_title.toLowerCase())
+      if (s.source_url) {
+        try {
+          urlBackedNames.add(new URL(s.source_url).hostname.replace(/^www\./, '').toLowerCase())
+        } catch { /* ignore */ }
+      }
+    }
+
+    const keptOrphans = titleOnly.filter((s) => {
+      const t = s.source_title.toLowerCase()
+      const covered = Array.from(urlBackedNames).some((name) => name.includes(t) || t.includes(name))
+      if (covered) {
+        console.log(`[GeminiParser] Dedup: dropping title-only orphan "${s.source_title}" (covered by URL-backed entry)`)
+      }
+      return !covered
+    })
+
+    const dedupedSources = [...urlBacked, ...keptOrphans]
+    console.log(`[GeminiParser] After dedup: ${dedupedSources.length} sources`)
+
+    // ── Completion tracking ──────────────────────────────────────────────────
+    const hasUrlSourceFinal = dedupedSources.some((source) => !!source.source_url)
+
+    if (openedByParser && hasUrlSourceFinal) {
+      closeSourcesPanel()
+    } else if (openedByParser) {
+      console.log('[GeminiParser] Panel opened but no URL sources yet - keeping panel open for retry')
+    }
+
     // Only mark response as complete once we have at least one URL-backed source.
-    if (hasUrlSource) {
+    if (hasUrlSourceFinal) {
       this.lastExtractedResponseId = currentResponseId
-      console.log(`[GeminiParser] Response extraction complete (found ${sources.length} sources)`)
+      console.log(`[GeminiParser] Response extraction complete (found ${dedupedSources.length} sources)`)
     } else {
       console.log('[GeminiParser] No URL-backed sources found yet - will retry on next mutation')
     }
 
-    return sources
+    return dedupedSources
   }
 }
