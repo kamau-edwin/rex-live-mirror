@@ -161,14 +161,13 @@ export class ChatGPTParser {
       this.stableResponseChecks += 1
     } else {
       this.lastResponseSnapshot = latestContent
-      this.stableResponseChecks = 0
-      console.log('[ChatGPTParser] Response changed - waiting for stability before capture')
-      return false
-    }
 
-    if (this.stableResponseChecks < 1) {
-      console.log('[ChatGPTParser] Waiting one extra poll for response stability')
-      return false
+      // ChatGPT UI variants can mutate non-content DOM text even after generation
+      // completes. Keep tracking changes, but do not hard-block dispatch forever.
+      if (this.stableResponseChecks === 0) {
+        this.stableResponseChecks = 1
+        console.log('[ChatGPTParser] Response changed - allowing capture after completion markers')
+      }
     }
 
     if (/\n\s*\d+\.\s*$/.test(latestContent)) {
