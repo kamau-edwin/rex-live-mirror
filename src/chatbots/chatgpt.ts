@@ -29,6 +29,8 @@ export interface ChatGPTConfig {
 export class ChatGPTParser {
   name = 'chatgpt'
   selectors: ChatGPTSelectors
+  private lastResponseSnapshot = ''
+  private stableResponseChecks = 0
 
   constructor(config?: ChatGPTConfig) {
     // Use config selectors or defaults
@@ -143,6 +145,41 @@ export class ChatGPTParser {
       return false
     }
 
+    const streamActive = document.querySelector('[data-stream-active="true"], [data-is-streaming="true"]')
+    if (streamActive) {
+      console.log('[ChatGPTParser] Response still streaming - stream-active marker detected')
+      return false
+    }
+
+    const latestMarkdown = document.querySelector(
+      '[data-message-author-role="assistant"]:last-of-type .markdown.prose, [data-message-author-role="assistant"]:last-of-type .markdown',
+    )
+    const latestContent = (latestMarkdown?.textContent || '').trim()
+
+    if (!latestContent) {
+      console.log('[ChatGPTParser] Response incomplete - empty assistant content')
+      return false
+    }
+
+    if (latestContent === this.lastResponseSnapshot) {
+      this.stableResponseChecks += 1
+    } else {
+      this.lastResponseSnapshot = latestContent
+      this.stableResponseChecks = 0
+      console.log('[ChatGPTParser] Response changed - waiting for stability before capture')
+      return false
+    }
+
+    if (this.stableResponseChecks < 1) {
+      console.log('[ChatGPTParser] Waiting one extra poll for response stability')
+      return false
+    }
+
+    if (/\n\s*\d+\.\s*$/.test(latestContent)) {
+      console.log('[ChatGPTParser] Response appears truncated at list marker, waiting for continuation')
+      return false
+    }
+
     // Response appears complete
     console.log('[ChatGPTParser] Response appears complete')
     return true
@@ -157,12 +194,51 @@ export class ChatGPTParser {
     const sources: ExtractedSource[] = []
     const visitedUrls = new Set<string>()
 
+    const normalizeSourceUrl = (rawUrl: string | null): string | undefined => {
+      if (!rawUrl) return undefined
+
+      let candidate = rawUrl.trim()
+      if (!candidate) return undefined
+
+      try {
+        if (candidate.startsWith('/')) {
+          candidate = new URL(candidate, window.location.origin).toString()
+        }
+
+        const parsed = new URL(candidate)
+
+        // ChatGPT/OpenAI source links can be redirect wrappers with the real URL in query params.
+        const redirectTarget =
+          parsed.searchParams.get('url') ||
+          parsed.searchParams.get('q') ||
+          parsed.searchParams.get('target') ||
+          parsed.searchParams.get('redirect') ||
+          parsed.searchParams.get('redirect_uri')
+
+        if (redirectTarget) {
+          try {
+            const decoded = decodeURIComponent(redirectTarget)
+            if (/^https?:\/\//i.test(decoded)) {
+              return decoded
+            }
+          } catch {
+            if (/^https?:\/\//i.test(redirectTarget)) {
+              return redirectTarget
+            }
+          }
+        }
+
+        return parsed.toString()
+      } catch {
+        return /^https?:\/\//i.test(candidate) ? candidate : undefined
+      }
+    }
+
     // Helper to check if URL should be skipped
     const shouldSkipUrl = (url: string): boolean => {
       if (!url) return true
       // Skip anchors, javascript, and internal links
       if (url.startsWith('#') || url.startsWith('javascript:')) return true
-      if (url.startsWith('/')) return true
       // Skip internal ChatGPT/OpenAI links (check domain, not full URL string)
       // URLs may contain utm_source=chatgpt.com which shouldn't be filtered
       try {
@@ -200,7 +276,7 @@ export class ChatGPTParser {
     const linkElements = document.querySelectorAll(linkSelector)
 
     linkElements.forEach((element) => {
-      const url = element.getAttribute('href')
+      const url = normalizeSourceUrl(element.getAttribute('href'))
       if (!url || shouldSkipUrl(url)) return
 
       let title = element.textContent?.trim()
