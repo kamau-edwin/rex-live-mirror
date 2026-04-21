@@ -35,6 +35,8 @@ export interface SelectorValidation {
 export class PerplexityParser {
   name = 'perplexity'
   selectors: PerplexitySelectors
+  private lastResponseSnapshot = ''
+  private stableResponseChecks = 0
 
   constructor(config?: PerplexityConfig) {
     // Use config selectors or defaults
@@ -100,6 +102,61 @@ export class PerplexityParser {
     }
 
     return interactions
+  }
+
+  /**
+   * Marks response completion when Perplexity renders the copy action for the latest response.
+   */
+  isResponseComplete(): boolean {
+    const stopButton = document.querySelector(
+      'button[aria-label*="Stop" i], button[data-testid*="stop" i], [data-testid*="streaming" i]',
+    )
+    if (stopButton) {
+      console.log('[PerplexityParser] Response still streaming - stop/streaming control detected')
+      return false
+    }
+
+    const responseSelector = this.selectors.assistantResponse || 'div[id^="markdown-content"]'
+    const responses = Array.from(document.querySelectorAll(responseSelector)) as HTMLElement[]
+    const latestResponse = responses[responses.length - 1]
+
+    if (!latestResponse) {
+      console.log('[PerplexityParser] Response incomplete - no assistant response node found')
+      return false
+    }
+
+    const latestContent = (latestResponse.textContent || '').trim()
+    if (!latestContent) {
+      console.log('[PerplexityParser] Response incomplete - empty assistant content')
+      return false
+    }
+
+    const responseContainer = latestResponse.closest('article, section, div')
+    const hasCopyButton = !!responseContainer?.querySelector(
+      'button[aria-label*="Copy" i], [data-testid*="copy" i]',
+    )
+
+    if (!hasCopyButton) {
+      console.log('[PerplexityParser] Response incomplete - copy action not available yet')
+      return false
+    }
+
+    if (latestContent === this.lastResponseSnapshot) {
+      this.stableResponseChecks += 1
+    } else {
+      this.lastResponseSnapshot = latestContent
+      this.stableResponseChecks = 0
+      console.log('[PerplexityParser] Response changed - waiting for stability before capture')
+      return false
+    }
+
+    if (this.stableResponseChecks < 1) {
+      console.log('[PerplexityParser] Waiting one extra poll for response stability')
+      return false
+    }
+
+    console.log('[PerplexityParser] Response appears complete')
+    return true
   }
 
   /**

@@ -156,8 +156,20 @@ export class ChatGPTParser {
     )
     const latestContent = (latestMarkdown?.textContent || '').trim()
 
+    const latestAssistantTurn = document.querySelector(
+      'section[data-turn="assistant"]:last-of-type, [data-testid^="conversation-turn-"][data-turn="assistant"]:last-of-type',
+    )
+    const hasCopyResponseButton = !!latestAssistantTurn?.querySelector(
+      'div[aria-label="Response actions"] [data-testid="copy-turn-action-button"], div[aria-label="Response actions"] button[aria-label="Copy response"]',
+    )
+
     if (!latestContent) {
       console.log('[ChatGPTParser] Response incomplete - empty assistant content')
+      return false
+    }
+
+    if (!hasCopyResponseButton) {
+      console.log('[ChatGPTParser] Response incomplete - response actions copy button not available yet')
       return false
     }
 
