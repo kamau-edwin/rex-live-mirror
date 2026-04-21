@@ -143,14 +143,17 @@ export class ChatGPTParser {
     const latestContent = (latestMarkdown?.textContent || latestAssistantMsg?.textContent || '').trim()
     const latestAssistantTurn = document.querySelector(assistantTurnSelector)
     const hasCopyResponseButton = !!latestAssistantTurn?.querySelector(copyResponseSelector)
+    const hasAnyCopyResponseButton = !!document.querySelector(copyResponseSelector)
 
     if (!latestContent) {
       console.log('[ChatGPTParser] Response incomplete - empty assistant content')
       return false
     }
 
-    if (!hasCopyResponseButton) {
-      console.log('[ChatGPTParser] Response incomplete - response actions copy button not available yet')
+    // Copy-action buttons are useful completion hints, but ChatGPT UI variants can
+    // omit or rename them. Treat absence as non-fatal to avoid blocking dispatch.
+    if (!hasCopyResponseButton && hasAnyCopyResponseButton) {
+      console.log('[ChatGPTParser] Response incomplete - latest turn copy button not available yet')
       return false
     }
 
