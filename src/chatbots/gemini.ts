@@ -54,6 +54,8 @@ export class GeminiParser {
   private fallbackMode: GeminiFallbackMode
   private selectorFallbacks: GeminiSelectorFallbacks
   private lastExtractedResponseId: string | undefined = undefined
+  private sourcePanelPrimedResponseId: string | undefined = undefined
+  private sourcePanelOpenedByParserResponseId: string | undefined = undefined
 
   constructor(config?: GeminiConfig) {
     // Config-only selectors: missing values are handled with warnings at call sites.
@@ -397,6 +399,14 @@ export class GeminiParser {
     const hasSourceAffordanceInLatestTurn =
       latestTurnSourceAnchors.length > 0 || latestTurnSourceButtons.length > 0
     if (!hasSourceAffordanceInLatestTurn) {
+      if (
+        this.sourcePanelOpenedByParserResponseId &&
+        this.sourcePanelOpenedByParserResponseId !== currentResponseId
+      ) {
+        closeSourcesPanel()
+        this.sourcePanelOpenedByParserResponseId = undefined
+        this.sourcePanelPrimedResponseId = undefined
+      }
       console.log('[GeminiParser] Latest response has no source affordance; returning empty sources for this turn')
       this.lastExtractedResponseId = currentResponseId
       return []
@@ -418,7 +428,13 @@ export class GeminiParser {
     if (sourceDetailAnchors.length === 0) {
       // Gemini may require opening the Sources panel before detail links are rendered.
       console.log('[GeminiParser] No detail anchors found, attempting to open sources panel')
-      openedByParser = maybeOpenSourcesPanel()
+      if (this.sourcePanelPrimedResponseId !== currentResponseId) {
+        openedByParser = maybeOpenSourcesPanel()
+        if (openedByParser) {
+          this.sourcePanelPrimedResponseId = currentResponseId
+          this.sourcePanelOpenedByParserResponseId = currentResponseId
+        }
+      }
       
       if (openedByParser) {
         // Re-query on the next mutation/render tick to allow panel DOM to populate.
@@ -525,8 +541,12 @@ export class GeminiParser {
     // ── Completion tracking ──────────────────────────────────────────────────
     const hasUrlSourceFinal = dedupedSources.some((source) => !!source.source_url)
 
-    if (openedByParser && hasUrlSourceFinal) {
+    const panelWasOpenedByParserForTurn = this.sourcePanelOpenedByParserResponseId === currentResponseId
+
+    if (panelWasOpenedByParserForTurn && hasUrlSourceFinal) {
       closeSourcesPanel()
+      this.sourcePanelOpenedByParserResponseId = undefined
+      this.sourcePanelPrimedResponseId = undefined
     } else if (openedByParser) {
       console.log('[GeminiParser] Panel opened but no URL sources yet - keeping panel open for retry')
     }
