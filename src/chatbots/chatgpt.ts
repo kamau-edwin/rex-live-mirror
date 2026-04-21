@@ -14,6 +14,16 @@ export interface ChatGPTSelectors {
   messageContainer?: string
   contentDiv?: string
   citationElements?: string
+  loginButton?: string
+  profileButton?: string
+  conversationId?: string
+  conversationTurnFallback?: string
+  assistantContent?: string
+  stopGeneratingButton?: string
+  writingBlock?: string
+  streamActive?: string
+  assistantTurnContainer?: string
+  copyResponseButton?: string
 }
 
 export interface ExtractedSource {
@@ -33,7 +43,6 @@ export class ChatGPTParser {
   private stableResponseChecks = 0
 
   constructor(config?: ChatGPTConfig) {
-    // Use config selectors or defaults
     this.selectors = config?.selectors || {
       userMessage: '[data-message-author-role="user"]',
       assistantMessage: '[data-message-author-role="assistant"]',
@@ -43,8 +52,8 @@ export class ChatGPTParser {
 
   extractInteractions(): ParsedInteraction[] {
     const interactions: ParsedInteraction[] = []
+    const assistantContentSelector = this.selectors.assistantContent || '.markdown.prose, .markdown'
 
-    // Find all user messages using config selector
     if (this.selectors.userMessage) {
       const userMessages = document.querySelectorAll(this.selectors.userMessage)
       console.log(`[ChatGPTParser] Found ${userMessages.length} user message elements`)
@@ -59,26 +68,14 @@ export class ChatGPTParser {
       })
     }
 
-    // Find all assistant messages using config selector
     if (this.selectors.assistantMessage) {
       const assistantMessageContainers = document.querySelectorAll(this.selectors.assistantMessage)
       console.log(`[ChatGPTParser] Found ${assistantMessageContainers.length} assistant message elements`)
-      
+
       assistantMessageContainers.forEach((container) => {
-        // Drill down to .markdown.prose for clean content extraction
-        // This avoids capturing buttons, labels, and other UI elements
-        const proseElement = container.querySelector('.markdown.prose, .markdown')
-        let content: string | null = null
-        
-        if (proseElement) {
-          content = proseElement.textContent?.trim()
-          console.log('[ChatGPTParser] Extracted content from .markdown element')
-        } else {
-          // Fallback to container textContent if .markdown not found
-          content = container.textContent?.trim()
-          console.log('[ChatGPTParser] No .markdown element found, using container textContent')
-        }
-        
+        const proseElement = container.querySelector(assistantContentSelector)
+        const content = proseElement?.textContent?.trim() || container.textContent?.trim() || null
+
         if (content && content.length > 0) {
           interactions.push({
             type: 'response',
@@ -88,17 +85,14 @@ export class ChatGPTParser {
       })
     }
 
-    // Fallback: Look for message groups if no messages found with primary selectors
-    // ChatGPT sometimes uses conversation-turn containers instead of role-based selectors
     if (interactions.length === 0) {
-      console.log('[ChatGPTParser] No messages found with primary selectors, trying fallback [data-testid="conversation-turn"]')
-      const messageGroups = document.querySelectorAll('[data-testid="conversation-turn"]')
+      const conversationTurnFallback = this.selectors.conversationTurnFallback || '[data-testid="conversation-turn"]'
+      console.log(`[ChatGPTParser] No messages found with primary selectors, trying fallback ${conversationTurnFallback}`)
+      const messageGroups = document.querySelectorAll(conversationTurnFallback)
       console.log(`[ChatGPTParser] Found ${messageGroups.length} conversation-turn elements`)
       messageGroups.forEach((group) => {
         const textContent = group.textContent?.trim()
         if (textContent && textContent.length > 0) {
-          // Alternate between question and response based on order
-          // ChatGPT alternates user/assistant in conversation turns
           interactions.push({
             type: interactions.length % 2 === 0 ? 'question' : 'response',
             content: textContent,
@@ -110,58 +104,45 @@ export class ChatGPTParser {
     return interactions
   }
 
-  /**
-   * Check if the latest response is still streaming or complete
-   * Returns true if response is finished (safe to capture)
-   * Returns false if response is still being generated
-   * 
-   * ChatGPT uses:
-   * - "Stop generating" button visible while streaming
-   * - aria-busy attribute on assistant message
-   * - data-writing-block on the response section
-   */
   isResponseComplete(): boolean {
-    // Method 1: Check for "Stop generating" button (indicates streaming in progress)
-    const stopButton = document.querySelector('button[aria-label="Stop generating"]')
-    if (stopButton) {
-      console.log('[ChatGPTParser] Response still streaming - "Stop generating" button detected')
+    const stopGeneratingSelector = this.selectors.stopGeneratingButton || 'button[aria-label="Stop generating"]'
+    const assistantSelector = this.selectors.assistantMessage || '[data-message-author-role="assistant"]'
+    const assistantContentSelector = this.selectors.assistantContent || '.markdown.prose, .markdown'
+    const writingBlockSelector = this.selectors.writingBlock || '[data-writing-block]'
+    const streamActiveSelector = this.selectors.streamActive || '[data-stream-active="true"], [data-is-streaming="true"]'
+    const assistantTurnSelector = this.selectors.assistantTurnContainer || 'section[data-turn="assistant"]:last-of-type, [data-testid^="conversation-turn-"][data-turn="assistant"]:last-of-type'
+    const copyResponseSelector = this.selectors.copyResponseButton || 'div[aria-label="Response actions"] [data-testid="copy-turn-action-button"], div[aria-label="Response actions"] button[aria-label="Copy response"]'
+
+    const getLastMatchedElement = (selector: string): Element | null => {
+      const matches = document.querySelectorAll(selector)
+      return matches.length > 0 ? matches[matches.length - 1] : null
+    }
+
+    if (document.querySelector(stopGeneratingSelector)) {
+      console.log('[ChatGPTParser] Response still streaming - stop generating button detected')
       return false
     }
 
-    // Method 2: Check for aria-busy on the latest assistant message
-    const latestAssistantMsg = document.querySelector('[data-message-author-role="assistant"]:last-of-type')
-    if (latestAssistantMsg) {
-      const ariaBusy = latestAssistantMsg.getAttribute('aria-busy')
-      if (ariaBusy === 'true') {
-        console.log('[ChatGPTParser] Response still streaming - aria-busy="true" detected')
-        return false
-      }
-    }
-
-    // Method 3: Check for data-writing-block on response section (ChatGPT streaming indicator)
-    const writingBlock = document.querySelector('[data-writing-block]')
-    if (writingBlock) {
-      console.log('[ChatGPTParser] Response still streaming - data-writing-block detected')
+    const latestAssistantMsg = getLastMatchedElement(assistantSelector)
+    if (latestAssistantMsg?.getAttribute('aria-busy') === 'true') {
+      console.log('[ChatGPTParser] Response still streaming - aria-busy="true" detected')
       return false
     }
 
-    const streamActive = document.querySelector('[data-stream-active="true"], [data-is-streaming="true"]')
-    if (streamActive) {
-      console.log('[ChatGPTParser] Response still streaming - stream-active marker detected')
+    if (document.querySelector(writingBlockSelector)) {
+      console.log('[ChatGPTParser] Response still streaming - writing block detected')
       return false
     }
 
-    const latestMarkdown = document.querySelector(
-      '[data-message-author-role="assistant"]:last-of-type .markdown.prose, [data-message-author-role="assistant"]:last-of-type .markdown',
-    )
-    const latestContent = (latestMarkdown?.textContent || '').trim()
+    if (document.querySelector(streamActiveSelector)) {
+      console.log('[ChatGPTParser] Response still streaming - stream active marker detected')
+      return false
+    }
 
-    const latestAssistantTurn = document.querySelector(
-      'section[data-turn="assistant"]:last-of-type, [data-testid^="conversation-turn-"][data-turn="assistant"]:last-of-type',
-    )
-    const hasCopyResponseButton = !!latestAssistantTurn?.querySelector(
-      'div[aria-label="Response actions"] [data-testid="copy-turn-action-button"], div[aria-label="Response actions"] button[aria-label="Copy response"]',
-    )
+    const latestMarkdown = latestAssistantMsg?.querySelector(assistantContentSelector)
+    const latestContent = (latestMarkdown?.textContent || latestAssistantMsg?.textContent || '').trim()
+    const latestAssistantTurn = document.querySelector(assistantTurnSelector)
+    const hasCopyResponseButton = !!latestAssistantTurn?.querySelector(copyResponseSelector)
 
     if (!latestContent) {
       console.log('[ChatGPTParser] Response incomplete - empty assistant content')
@@ -192,16 +173,10 @@ export class ChatGPTParser {
       return false
     }
 
-    // Response appears complete
     console.log('[ChatGPTParser] Response appears complete')
     return true
   }
 
-  /**
-   * Extract sources cited in the response
-   * Combines DOM-based link extraction with text-based URL extraction
-   * ChatGPT often displays URLs as inline text before they become clickable
-   */
   extractSources(): ExtractedSource[] {
     const sources: ExtractedSource[] = []
     const visitedUrls = new Set<string>()
@@ -218,8 +193,6 @@ export class ChatGPTParser {
         }
 
         const parsed = new URL(candidate)
-
-        // ChatGPT/OpenAI source links can be redirect wrappers with the real URL in query params.
         const redirectTarget =
           parsed.searchParams.get('url') ||
           parsed.searchParams.get('q') ||
@@ -246,26 +219,20 @@ export class ChatGPTParser {
       }
     }
 
-    // Helper to check if URL should be skipped
     const shouldSkipUrl = (url: string): boolean => {
       if (!url) return true
-      // Skip anchors, javascript, and internal links
       if (url.startsWith('#') || url.startsWith('javascript:')) return true
-      // Skip internal ChatGPT/OpenAI links (check domain, not full URL string)
-      // URLs may contain utm_source=chatgpt.com which shouldn't be filtered
+      if (url.startsWith('/')) return true
       try {
         const hostname = new URL(url).hostname
         if (hostname.includes('chatgpt.com') || hostname.includes('openai.com')) return true
       } catch {
-        // If URL parsing fails, skip it
         return true
       }
-      // Skip already visited
       if (visitedUrls.has(url)) return true
       return false
     }
 
-    // Helper to check if title is valid (not navigation/accessibility text)
     const isValidTitle = (title: string): boolean => {
       if (!title || title.length < 3) return false
       const skipPatterns = [
@@ -274,17 +241,12 @@ export class ChatGPTParser {
         /^go\s+to/i,
         /^main\s+content/i,
         /^navigation/i,
-        /^\d+$/,  // Just numbers
+        /^\d+$/,
       ]
       return !skipPatterns.some((pattern) => pattern.test(title))
     }
 
-    // Method 1: Extract from DOM links using ek_dev selectors
-    // ChatGPT uses links, nav-list links, and footnote buttons for citations
-    const linkSelector =
-      this.selectors.citationElements ||
-      '[data-message-author-role="assistant"] a[href], .group\\/nav-list a[href], button.group\\/footnote a[href]'
-
+    const linkSelector = this.selectors.citationElements || '[data-message-author-role="assistant"] a[href], .group\\/nav-list a[href], button.group\\/footnote a[href]'
     const linkElements = document.querySelectorAll(linkSelector)
 
     linkElements.forEach((element) => {
@@ -299,7 +261,6 @@ export class ChatGPTParser {
         title = element.getAttribute('title') || element.getAttribute('aria-label') || undefined
       }
 
-      // If title is just a URL or not valid, extract domain as title
       if (!title || !isValidTitle(title) || title.startsWith('http')) {
         try {
           title = new URL(url).hostname.replace(/^www\./, '')
@@ -308,18 +269,13 @@ export class ChatGPTParser {
         }
       }
 
-      if (url && title) {
-        visitedUrls.add(url)
-        sources.push({ source_title: title, source_url: url })
-      }
+      visitedUrls.add(url)
+      sources.push({ source_title: title, source_url: url })
     })
 
-    // Method 2: Extract URLs from response text content (inline URLs)
-    // ChatGPT often shows URLs as plain text before they're linkified
     const assistantMessages = document.querySelectorAll(
       this.selectors.assistantMessage || '[data-message-author-role="assistant"]',
     )
-
     const urlRegex = /https?:\/\/[^\s<>"{}|\\^`[\]]+/g
 
     assistantMessages.forEach((msg) => {
@@ -328,13 +284,10 @@ export class ChatGPTParser {
 
       if (matches) {
         matches.forEach((url) => {
-          // Clean up URL (remove trailing punctuation)
           const cleanUrl = url.replace(/[.,;:!?)]+$/, '')
-
           if (shouldSkipUrl(cleanUrl)) return
 
           visitedUrls.add(cleanUrl)
-          // Use domain as title for text-extracted URLs
           try {
             const domain = new URL(cleanUrl).hostname.replace(/^www\./, '')
             sources.push({ source_title: domain, source_url: cleanUrl })
