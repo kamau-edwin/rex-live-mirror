@@ -449,9 +449,17 @@ export class GeminiParser {
     const latestTurnSourceButtons = sourceButtonSelector ? queryWithinLatestTurn(sourceButtonSelector) : []
     const latestTurnCitationButtons = latestTurnSourceButtons.filter((button) => this.isCitationSourceButton(button))
 
-    // If latest turn has no source affordance, do not read side panel anchors (which can be stale).
+    // Some Gemini turns expose sources only behind a footer Sources toggle button.
+    const sourceToggleSelector = this.resolveSelector('sourceToggleButton')
+    const hasFooterSourceToggleInLatestTurn = sourceToggleSelector
+      ? queryWithinLatestTurn(sourceToggleSelector).length > 0
+      : false
+
+    // If latest turn has no source affordance at all, do not read side panel anchors (which can be stale).
     const hasSourceAffordanceInLatestTurn =
-      latestTurnSourceAnchors.length > 0 || latestTurnCitationButtons.length > 0
+      latestTurnSourceAnchors.length > 0 ||
+      latestTurnCitationButtons.length > 0 ||
+      hasFooterSourceToggleInLatestTurn
     if (!hasSourceAffordanceInLatestTurn) {
       if (
         this.sourcePanelOpenedByParserResponseId &&
@@ -645,12 +653,31 @@ export class GeminiParser {
       const citationCandidateCount = latestTurnCitationButtons.length
 
       // Some Gemini responses legitimately have no sources. Finalize those turns with empty sources.
-      if (citationCandidateCount === 0 && sourceDetailAnchors.length === 0 && latestTurnSourceAnchors.length === 0) {
+      if (
+        citationCandidateCount === 0 &&
+        sourceDetailAnchors.length === 0 &&
+        latestTurnSourceAnchors.length === 0 &&
+        !hasFooterSourceToggleInLatestTurn
+      ) {
         this.lastExtractedResponseId = currentResponseId
         if (currentResponseId) {
           this.clickedSourceButtonsByResponse.delete(currentResponseId)
         }
         console.log('[GeminiParser] No source citations detected for this turn - finalizing with empty sources')
+        return []
+      }
+
+      // Footer-only source turns: after one panel-open attempt for this turn, stop retrying forever.
+      if (
+        citationCandidateCount === 0 &&
+        hasFooterSourceToggleInLatestTurn &&
+        sourceDetailAnchors.length === 0 &&
+        this.sourcePanelPrimedResponseId === currentResponseId
+      ) {
+        this.lastExtractedResponseId = currentResponseId
+        this.sourcePanelPrimedResponseId = undefined
+        this.sourcePanelOpenedByParserResponseId = undefined
+        console.log('[GeminiParser] Footer sources toggle produced no URL links - finalizing with empty sources')
         return []
       }
 
