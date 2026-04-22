@@ -35,14 +35,44 @@ export interface SelectorValidation {
 export class PerplexityParser {
   name = 'perplexity'
   selectors: PerplexitySelectors
+  private selectorValidationError: string | null = null
 
   constructor(config?: PerplexityConfig) {
-    // Use config selectors or defaults
-    this.selectors = config?.selectors || {
-      userQuestion: ':is(h1, div)[class*="group/query"] span.select-text',
-      assistantResponse: 'div[id^="markdown-content"]',
+    // Use config selectors or fail
+    this.selectors = config?.selectors || {}
+    
+    // STRICT MODE: Validate required selectors
+    const required: (keyof PerplexitySelectors)[] = [
+      'userQuestion',
+      'assistantResponse'
+    ]
+    
+    const missing = required.filter(key => !this.selectors[key])
+    if (missing.length > 0) {
+      this.selectorValidationError = `Missing required selectors: ${missing.join(', ')}`
+      console.error(`[PerplexityParser] ${this.selectorValidationError}`)
+      this.reportConfigValidationFailure(this.selectorValidationError)
     }
+    
     console.log('[PerplexityParser] Initialized with selectors:', this.selectors)
+  }
+
+  private reportConfigValidationFailure(error: string): void {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(chrome.runtime.sendMessage as any)({
+        messageType: 'llmConfigValidationFailure',
+        payload: {
+          source: 'perplexity',
+          error,
+          timestamp: Date.now(),
+          url: window.location.href,
+          selectors: this.selectors
+        }
+      })
+    } catch (e) {
+      console.error('[PerplexityParser] Failed to report config failure:', e)
+    }
   }
 
   /**
@@ -67,6 +97,11 @@ export class PerplexityParser {
   }
 
   extractInteractions(): ParsedInteraction[] {
+    if (this.selectorValidationError) {
+      console.error('[PerplexityParser] Cannot extract - selector validation failed:', this.selectorValidationError)
+      return []
+    }
+
     const interactions: ParsedInteraction[] = []
 
     // Find all user questions using config selector

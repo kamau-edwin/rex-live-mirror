@@ -57,13 +57,48 @@ export class GeminiParser {
   private sourcePanelPrimedResponseId: string | undefined = undefined
   private sourcePanelOpenedByParserResponseId: string | undefined = undefined
   private clickedSourceButtonsByResponse = new Map<string, Set<string>>()
+  private selectorValidationError: string | null = null
 
   constructor(config?: GeminiConfig) {
     // Config-only selectors: missing values are handled with warnings at call sites.
     this.selectors = config?.selectors || {}
     this.fallbackMode = config?.fallback_mode || 'append'
     this.selectorFallbacks = config?.selector_fallbacks || {}
+    
+    // STRICT MODE: Validate required selectors are present
+    const required: (keyof GeminiSelectors)[] = [
+      'userMessage',
+      'assistantMessage',
+      'responseContainer',
+      'completeFooter'
+    ]
+    
+    const missing = required.filter(key => !this.selectors[key])
+    if (missing.length > 0) {
+      this.selectorValidationError = `Missing required selectors: ${missing.join(', ')}`
+      console.error(`[GeminiParser] ${this.selectorValidationError}`)
+      this.reportConfigValidationFailure(this.selectorValidationError)
+    }
+    
     console.log('[GeminiParser] Initialized with selectors:', this.selectors)
+  }
+
+  private reportConfigValidationFailure(error: string): void {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(chrome.runtime.sendMessage as any)({
+        messageType: 'llmConfigValidationFailure',
+        payload: {
+          source: 'gemini',
+          error,
+          timestamp: Date.now(),
+          url: window.location.href,
+          selectors: this.selectors
+        }
+      })
+    } catch (e) {
+      console.error('[GeminiParser] Failed to report config failure:', e)
+    }
   }
 
   /**
@@ -156,6 +191,11 @@ export class GeminiParser {
   }
 
   extractInteractions(): ParsedInteraction[] {
+    if (this.selectorValidationError) {
+      console.error('[GeminiParser] Cannot extract - selector validation failed:', this.selectorValidationError)
+      return []
+    }
+
     const interactions: ParsedInteraction[] = []
 
     // Find user messages using config selector

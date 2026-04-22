@@ -9,21 +9,16 @@ export interface ParsedInteraction {
 }
 
 export interface ChatGPTSelectors {
-  userMessage?: string
-  assistantMessage?: string
-  messageContainer?: string
-  contentDiv?: string
-  citationElements?: string
-  loginButton?: string
-  profileButton?: string
-  conversationId?: string
-  conversationTurnFallback?: string
-  assistantContent?: string
-  stopGeneratingButton?: string
-  writingBlock?: string
-  streamActive?: string
-  assistantTurnContainer?: string
-  copyResponseButton?: string
+  userMessage: string
+  assistantMessage: string
+  conversationTurnFallback: string
+  assistantContent: string
+  stopGeneratingButton: string
+  writingBlock: string
+  streamActive: string
+  assistantTurnContainer: string
+  copyResponseButton: string
+  citationElements: string
 }
 
 export interface ExtractedSource {
@@ -41,18 +36,61 @@ export class ChatGPTParser {
   selectors: ChatGPTSelectors
   private lastResponseSnapshot = ''
   private stableResponseChecks = 0
+  private selectorValidationError: string | null = null
 
   constructor(config?: ChatGPTConfig) {
-    this.selectors = config?.selectors || {
-      userMessage: '[data-message-author-role="user"]',
-      assistantMessage: '[data-message-author-role="assistant"]',
+    this.selectors = config?.selectors as ChatGPTSelectors || ({} as ChatGPTSelectors)
+    
+    // STRICT MODE: Validate all required selectors are present
+    const required: (keyof ChatGPTSelectors)[] = [
+      'userMessage',
+      'assistantMessage',
+      'assistantContent',
+      'conversationTurnFallback',
+      'stopGeneratingButton',
+      'writingBlock',
+      'streamActive',
+      'assistantTurnContainer',
+      'copyResponseButton',
+      'citationElements'
+    ]
+    
+    const missing = required.filter(key => !this.selectors[key])
+    if (missing.length > 0) {
+      this.selectorValidationError = `Missing required selectors: ${missing.join(', ')}`
+      console.error(`[ChatGPTParser] ${this.selectorValidationError}`)
+      this.reportConfigValidationFailure(this.selectorValidationError)
     }
-    console.log('[ChatGPTParser] Initialized with selectors:', this.selectors)
+    
+    console.log('[ChatGPTParser] Initialized with config selectors (strict mode - no fallbacks)', this.selectors)
+  }
+
+  private reportConfigValidationFailure(error: string): void {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(chrome.runtime.sendMessage as any)({
+        messageType: 'llmConfigValidationFailure',
+        payload: {
+          source: 'chatgpt',
+          error,
+          timestamp: Date.now(),
+          url: window.location.href,
+          selectors: this.selectors
+        }
+      })
+    } catch (e) {
+      console.error('[ChatGPTParser] Failed to report config failure:', e)
+    }
   }
 
   extractInteractions(): ParsedInteraction[] {
+    if (this.selectorValidationError) {
+      console.error('[ChatGPTParser] Cannot extract - selector validation failed:', this.selectorValidationError)
+      return []
+    }
+
     const interactions: ParsedInteraction[] = []
-    const assistantContentSelector = this.selectors.assistantContent || '.markdown.prose, .markdown'
+    const assistantContentSelector = this.selectors.assistantContent
 
     if (this.selectors.userMessage) {
       const userMessages = document.querySelectorAll(this.selectors.userMessage)
@@ -86,9 +124,8 @@ export class ChatGPTParser {
     }
 
     if (interactions.length === 0) {
-      const conversationTurnFallback = this.selectors.conversationTurnFallback || '[data-testid="conversation-turn"]'
-      console.log(`[ChatGPTParser] No messages found with primary selectors, trying fallback ${conversationTurnFallback}`)
-      const messageGroups = document.querySelectorAll(conversationTurnFallback)
+      console.log(`[ChatGPTParser] No messages found with primary selectors, trying fallback ${this.selectors.conversationTurnFallback}`)
+      const messageGroups = document.querySelectorAll(this.selectors.conversationTurnFallback)
       console.log(`[ChatGPTParser] Found ${messageGroups.length} conversation-turn elements`)
       messageGroups.forEach((group) => {
         const textContent = group.textContent?.trim()
@@ -105,13 +142,18 @@ export class ChatGPTParser {
   }
 
   isResponseComplete(): boolean {
-    const stopGeneratingSelector = this.selectors.stopGeneratingButton || 'button[aria-label="Stop generating"]'
-    const assistantSelector = this.selectors.assistantMessage || '[data-message-author-role="assistant"]'
-    const assistantContentSelector = this.selectors.assistantContent || '.markdown.prose, .markdown'
-    const writingBlockSelector = this.selectors.writingBlock || '[data-writing-block]'
-    const streamActiveSelector = this.selectors.streamActive || '[data-stream-active="true"], [data-is-streaming="true"]'
-    const assistantTurnSelector = this.selectors.assistantTurnContainer || 'section[data-turn="assistant"]:last-of-type, [data-testid^="conversation-turn-"][data-turn="assistant"]:last-of-type'
-    const copyResponseSelector = this.selectors.copyResponseButton || 'div[aria-label="Response actions"] [data-testid="copy-turn-action-button"], div[aria-label="Response actions"] button[aria-label="Copy response"]'
+    if (this.selectorValidationError) {
+      console.error('[ChatGPTParser] Cannot validate completion - selector validation failed:', this.selectorValidationError)
+      return false
+    }
+
+    const stopGeneratingSelector = this.selectors.stopGeneratingButton
+    const assistantSelector = this.selectors.assistantMessage
+    const assistantContentSelector = this.selectors.assistantContent
+    const writingBlockSelector = this.selectors.writingBlock
+    const streamActiveSelector = this.selectors.streamActive
+    const assistantTurnSelector = this.selectors.assistantTurnContainer
+    const copyResponseSelector = this.selectors.copyResponseButton
 
     const getLastMatchedElement = (selector: string): Element | null => {
       const matches = document.querySelectorAll(selector)
@@ -143,17 +185,15 @@ export class ChatGPTParser {
     const latestContent = (latestMarkdown?.textContent || latestAssistantMsg?.textContent || '').trim()
     const latestAssistantTurn = document.querySelector(assistantTurnSelector)
     const hasCopyResponseButton = !!latestAssistantTurn?.querySelector(copyResponseSelector)
-    const hasAnyCopyResponseButton = !!document.querySelector(copyResponseSelector)
 
     if (!latestContent) {
       console.log('[ChatGPTParser] Response incomplete - empty assistant content')
       return false
     }
 
-    // Copy-action buttons are useful completion hints, but ChatGPT UI variants can
-    // omit or rename them. Treat absence as non-fatal to avoid blocking dispatch.
-    if (!hasCopyResponseButton && hasAnyCopyResponseButton) {
-      console.log('[ChatGPTParser] Response incomplete - latest turn copy button not available yet')
+    // MANDATORY: Copy button MUST appear on the latest turn - hard completion signal
+    if (!hasCopyResponseButton) {
+      console.log('[ChatGPTParser] Response incomplete - copy button not found on latest turn (awaiting completion)')
       return false
     }
 
@@ -182,6 +222,11 @@ export class ChatGPTParser {
   }
 
   extractSources(): ExtractedSource[] {
+    if (this.selectorValidationError) {
+      console.error('[ChatGPTParser] Cannot extract sources - selector validation failed:', this.selectorValidationError)
+      return []
+    }
+
     const sources: ExtractedSource[] = []
     const visitedUrls = new Set<string>()
 
@@ -250,7 +295,7 @@ export class ChatGPTParser {
       return !skipPatterns.some((pattern) => pattern.test(title))
     }
 
-    const linkSelector = this.selectors.citationElements || '[data-message-author-role="assistant"] a[href], .group\\/nav-list a[href], button.group\\/footnote a[href]'
+    const linkSelector = this.selectors.citationElements
     const linkElements = document.querySelectorAll(linkSelector)
 
     linkElements.forEach((element) => {
@@ -278,7 +323,7 @@ export class ChatGPTParser {
     })
 
     const assistantMessages = document.querySelectorAll(
-      this.selectors.assistantMessage || '[data-message-author-role="assistant"]',
+      this.selectors.assistantMessage,
     )
     const urlRegex = /https?:\/\/[^\s<>"{}|\\^`[\]]+/g
 
