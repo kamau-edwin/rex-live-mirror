@@ -54,8 +54,6 @@ export class GeminiParser {
   private fallbackMode: GeminiFallbackMode
   private selectorFallbacks: GeminiSelectorFallbacks
   private lastExtractedResponseId: string | undefined = undefined
-  private sourcePanelPrimedResponseId: string | undefined = undefined
-  private sourcePanelOpenedByParserResponseId: string | undefined = undefined
   private clickedSourceButtonsByResponse = new Map<string, Set<string>>()
   private selectorValidationError: string | null = null
 
@@ -427,9 +425,19 @@ export class GeminiParser {
         return false
       }
 
+      // Immediate click - open sources panel for rapid extraction (sub-500ms total visible)
       toggle.click()
       console.log('[GeminiParser] Clicked sources toggle to reveal source URLs')
       return true
+    }
+
+    const removeSourcesPanelCss = (): void => {
+      const styleId = 'gemini-sources-hidden'
+      const style = document.getElementById(styleId)
+      if (style) {
+        style.remove()
+        console.log('[GeminiParser] Removed CSS hide - sources panel can now be closed naturally')
+      }
     }
 
     const queryWithinLatestTurn = (selector: string): Element[] => {
@@ -446,7 +454,8 @@ export class GeminiParser {
         return
       }
 
-      // Add a small delay to ensure panel DOM is fully rendered
+      // Brief 100ms delay to ensure extraction completes, then close panel quickly (total ~200-300ms)
+      const SOURCES_CLOSE_DELAY_MS = 100
       setTimeout(() => {
         const closeButton = document.querySelector(closeSelector) as HTMLElement | null
         if (closeButton) {
@@ -459,8 +468,8 @@ export class GeminiParser {
         }
 
         closeButton.click()
-        console.log('[GeminiParser] Clicked to close sources sidebar after extraction')
-      }, 200)
+        console.log('[GeminiParser] Clicked to close sources sidebar after rapid extraction')
+      }, SOURCES_CLOSE_DELAY_MS)
     }
 
     // Prefer explicit source links when present (scoped to latest response turn).
@@ -501,16 +510,8 @@ export class GeminiParser {
       latestTurnCitationButtons.length > 0 ||
       hasFooterSourceToggleInLatestTurn
     if (!hasSourceAffordanceInLatestTurn) {
-      if (
-        this.sourcePanelOpenedByParserResponseId &&
-        this.sourcePanelOpenedByParserResponseId !== currentResponseId
-      ) {
-        closeSourcesPanel()
-        this.sourcePanelOpenedByParserResponseId = undefined
-        this.sourcePanelPrimedResponseId = undefined
-      }
+      closeSourcesPanel()
       console.log('[GeminiParser] Latest response has no source affordance; returning empty sources for this turn')
-      this.lastExtractedResponseId = currentResponseId
       return []
     }
 
@@ -530,13 +531,7 @@ export class GeminiParser {
     if (sourceDetailAnchors.length === 0) {
       // Gemini may require opening the Sources panel before detail links are rendered.
       console.log('[GeminiParser] No detail anchors found, attempting to open sources panel')
-      if (this.sourcePanelPrimedResponseId !== currentResponseId) {
-        openedByParser = maybeOpenSourcesPanel()
-        if (openedByParser) {
-          this.sourcePanelPrimedResponseId = currentResponseId
-          this.sourcePanelOpenedByParserResponseId = currentResponseId
-        }
-      }
+      openedByParser = maybeOpenSourcesPanel()
       
       if (openedByParser) {
         // Re-query on the next mutation/render tick to allow panel DOM to populate.
@@ -566,10 +561,14 @@ export class GeminiParser {
             const key = `${index}:${aria || text}`
             if (clicked.has(key)) return
 
-            ;(button as HTMLElement).click()
+            // Brief 100ms delay before clicking citation button (allows initial render)
+            const CITATION_CLICK_DELAY_MS = 100
+            setTimeout(() => {
+              ;(button as HTMLElement).click()
+              console.log(`[GeminiParser] Clicked citation button to hydrate detail links: ${aria || text || key}`)
+            }, CITATION_CLICK_DELAY_MS)
             clicked.add(key)
             clickedAny = true
-            console.log(`[GeminiParser] Clicked citation button to hydrate detail links: ${aria || text || key}`)
           })
 
           if (clickedAny) {
@@ -667,17 +666,10 @@ export class GeminiParser {
     const dedupedSources = [...urlBacked, ...keptOrphans]
     console.log(`[GeminiParser] After dedup: ${dedupedSources.length} sources`)
 
-    // ── Completion tracking ──────────────────────────────────────────────────
-    const hasUrlSourceFinal = dedupedSources.some((source) => !!source.source_url)
-
-    const panelWasOpenedByParserForTurn = this.sourcePanelOpenedByParserResponseId === currentResponseId
-
-    if (panelWasOpenedByParserForTurn && hasUrlSourceFinal) {
+    // Panel open/close is now decoupled from response ID tracking
+    if (openedByParser) {
       closeSourcesPanel()
-      this.sourcePanelOpenedByParserResponseId = undefined
-      this.sourcePanelPrimedResponseId = undefined
-    } else if (openedByParser) {
-      console.log('[GeminiParser] Panel opened but no URL sources yet - keeping panel open for retry')
+      console.log('[GeminiParser] Closed sources panel after extraction (was opened by parser in this call)')
     }
 
     // Only mark response as complete once we have at least one URL-backed source.
@@ -711,12 +703,9 @@ export class GeminiParser {
       if (
         citationCandidateCount === 0 &&
         hasFooterSourceToggleInLatestTurn &&
-        sourceDetailAnchors.length === 0 &&
-        this.sourcePanelPrimedResponseId === currentResponseId
+        sourceDetailAnchors.length === 0
       ) {
-        this.lastExtractedResponseId = currentResponseId
-        this.sourcePanelPrimedResponseId = undefined
-        this.sourcePanelOpenedByParserResponseId = undefined
+        this.clickedSourceButtonsByResponse.delete(currentResponseId)
         console.log('[GeminiParser] Footer sources toggle produced no URL links - finalizing with empty sources')
         return []
       }
