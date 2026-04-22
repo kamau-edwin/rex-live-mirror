@@ -266,24 +266,16 @@ export class GeminiParser {
   }
 
   extractSources(): ExtractedSource[] {
-    // Get current response ID to detect if we're processing a new response
-    const responseContainerSelector = this.resolveSelector('responseContainer')
-    if (!responseContainerSelector) {
-      console.warn('[GeminiParser] Missing config selector: responseContainer')
-      return []
-    }
+    // Get all user interactions to extract latest question for response ID
+    const interactions = this.extractInteractions()
+    const latestQuestion = interactions
+      .reverse()
+      .find((i) => i.type === 'question')?.content
 
-    const responseContainers = document.querySelectorAll(responseContainerSelector)
-    const latestResponseContainer =
-      responseContainers.length > 0 ? (responseContainers[responseContainers.length - 1] as Element) : undefined
-    const latestResponseContainerId =
-      latestResponseContainer?.getAttribute('data-turn-id') ||
-      latestResponseContainer?.getAttribute('id') ||
-      latestResponseContainer?.getAttribute('data-testid') ||
-      undefined
-    const currentResponseId = latestResponseContainer
-      ? `${responseContainers.length}:${latestResponseContainerId || 'latest'}`
-      : undefined
+    // Create response ID from latest question + timestamp (rounded to nearest second)
+    // This ensures new questions get new IDs, preventing cross-question deduplication
+    const roundedTimestamp = Math.floor(Date.now() / 1000)
+    const currentResponseId = latestQuestion ? `${latestQuestion}:${roundedTimestamp}` : undefined
 
     // Skip if we've already extracted sources for this response
     if (currentResponseId === this.lastExtractedResponseId) {
@@ -295,6 +287,22 @@ export class GeminiParser {
 
     const sources: ExtractedSource[] = []
     const seen = new Set<string>()
+
+    // Get latest response container for querying source elements
+    const responseContainerSelector = this.resolveSelector('responseContainer')
+    if (!responseContainerSelector) {
+      console.warn('[GeminiParser] Missing config selector: responseContainer')
+      return []
+    }
+
+    const responseContainers = document.querySelectorAll(responseContainerSelector)
+    const latestResponseContainer =
+      responseContainers.length > 0 ? (responseContainers[responseContainers.length - 1] as Element) : undefined
+
+    if (!latestResponseContainer) {
+      console.warn('[GeminiParser] No response containers found')
+      return []
+    }
 
     console.log('[GeminiParser] Starting source extraction')
     console.log('[GeminiParser] Config selectors:', {
