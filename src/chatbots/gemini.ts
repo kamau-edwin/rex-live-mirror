@@ -666,6 +666,8 @@ export class GeminiParser {
     const dedupedSources = [...urlBacked, ...keptOrphans]
     console.log(`[GeminiParser] After dedup: ${dedupedSources.length} sources`)
 
+    const hasUrlSourceFinal = dedupedSources.some((source) => !!source.source_url)
+
     // Panel open/close is now decoupled from response ID tracking
     if (openedByParser) {
       closeSourcesPanel()
