@@ -103,6 +103,27 @@ export class GeminiParser {
     return content.replace(/^\s*you\s+said\s*/i, '').replace(/\s+/g, ' ').trim()
   }
 
+  private isCitationSourceButton(button: Element): boolean {
+    const aria = (button.getAttribute('aria-label') || '').toLowerCase()
+    const dataTestId = (button.getAttribute('data-test-id') || '').toLowerCase()
+    const className = (button.getAttribute('class') || '').toLowerCase()
+
+    if (aria.includes('view source details')) {
+      return true
+    }
+
+    if (dataTestId.includes('source') || dataTestId.includes('citation')) {
+      return true
+    }
+
+    // Ignore generic controls like footer "Sources" toggle buttons.
+    if (aria === 'sources' || className.includes('legacy-sources-sidebar-button')) {
+      return false
+    }
+
+    return false
+  }
+
   /**
    * Resolve a selector using configured fallback behavior.
    */
@@ -426,10 +447,11 @@ export class GeminiParser {
     // Source chips/buttons are also scoped to latest response turn.
     const sourceButtonSelector = this.resolveSelector('sourceButtons')
     const latestTurnSourceButtons = sourceButtonSelector ? queryWithinLatestTurn(sourceButtonSelector) : []
+    const latestTurnCitationButtons = latestTurnSourceButtons.filter((button) => this.isCitationSourceButton(button))
 
     // If latest turn has no source affordance, do not read side panel anchors (which can be stale).
     const hasSourceAffordanceInLatestTurn =
-      latestTurnSourceAnchors.length > 0 || latestTurnSourceButtons.length > 0
+      latestTurnSourceAnchors.length > 0 || latestTurnCitationButtons.length > 0
     if (!hasSourceAffordanceInLatestTurn) {
       if (
         this.sourcePanelOpenedByParserResponseId &&
@@ -483,19 +505,16 @@ export class GeminiParser {
 
         // If detail anchors are still missing, progressively click citation chips
         // to force Gemini to populate side-panel source links.
-        if (sourceDetailAnchors.length === 0 && currentResponseId && latestTurnSourceButtons.length > 0) {
+        if (sourceDetailAnchors.length === 0 && currentResponseId && latestTurnCitationButtons.length > 0) {
           const clicked = this.clickedSourceButtonsByResponse.get(currentResponseId) || new Set<string>()
           this.clickedSourceButtonsByResponse.set(currentResponseId, clicked)
 
           let clickedAny = false
-          latestTurnSourceButtons.forEach((button, index) => {
+          latestTurnCitationButtons.forEach((button, index) => {
             if (clickedAny) return
 
             const aria = button.getAttribute('aria-label')?.trim() || ''
             const text = button.textContent?.replace(/\s+/g, ' ').trim() || ''
-            const isCitationButton = /view\s+source\s+details/i.test(aria)
-            if (!isCitationButton) return
-
             const key = `${index}:${aria || text}`
             if (clicked.has(key)) return
 
@@ -621,6 +640,30 @@ export class GeminiParser {
       }
       console.log(`[GeminiParser] Response extraction complete (found ${dedupedSources.length} sources)`)
     } else {
+      const clickedForResponse = currentResponseId ? this.clickedSourceButtonsByResponse.get(currentResponseId) : undefined
+      const clickedCount = clickedForResponse?.size || 0
+      const citationCandidateCount = latestTurnCitationButtons.length
+
+      // Some Gemini responses legitimately have no sources. Finalize those turns with empty sources.
+      if (citationCandidateCount === 0 && sourceDetailAnchors.length === 0 && latestTurnSourceAnchors.length === 0) {
+        this.lastExtractedResponseId = currentResponseId
+        if (currentResponseId) {
+          this.clickedSourceButtonsByResponse.delete(currentResponseId)
+        }
+        console.log('[GeminiParser] No source citations detected for this turn - finalizing with empty sources')
+        return []
+      }
+
+      // If all citation chips have already been tried and no URL links emerged, stop retrying forever.
+      if (citationCandidateCount > 0 && clickedCount >= citationCandidateCount && sourceDetailAnchors.length === 0) {
+        this.lastExtractedResponseId = currentResponseId
+        if (currentResponseId) {
+          this.clickedSourceButtonsByResponse.delete(currentResponseId)
+        }
+        console.log('[GeminiParser] Citation chips exhausted without URL links - finalizing with empty sources')
+        return []
+      }
+
       console.log('[GeminiParser] No URL-backed sources found yet - will retry on next mutation')
     }
 
