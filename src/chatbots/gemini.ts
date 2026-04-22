@@ -541,50 +541,42 @@ export class GeminiParser {
       console.log('[GeminiParser] No detail anchors found, attempting to open sources panel')
       openedByParser = maybeOpenSourcesPanel()
       
-      if (openedByParser) {
-        // Re-query on the next mutation/render tick to allow panel DOM to populate.
-        console.log('[GeminiParser] Panel opened by parser, deferring source extraction to next tick')
+      // After opening panel, click citation buttons to hydrate detail anchors
+      // (detail anchors won't exist until we interact with citation buttons)
+    }
+    
+    if (sourceDetailAnchors.length === 0 && currentResponseId && latestTurnCitationButtons.length > 0) {
+      const clicked = this.clickedSourceButtonsByResponse.get(currentResponseId) || new Set<string>()
+      this.clickedSourceButtonsByResponse.set(currentResponseId, clicked)
+
+      let clickedAny = false
+      latestTurnCitationButtons.forEach((button, index) => {
+        if (clickedAny) return
+
+        const aria = button.getAttribute('aria-label')?.trim() || ''
+        const text = button.textContent?.replace(/\s+/g, ' ').trim() || ''
+        const key = `${index}:${aria || text}`
+        if (clicked.has(key)) return
+
+        ;(button as HTMLElement).click()
+        console.log(`[GeminiParser] Clicked citation button to hydrate detail links: ${aria || text || key}`)
+        clicked.add(key)
+        clickedAny = true
+      })
+
+      if (clickedAny) {
+        // Let Gemini render updated side-panel anchors before extracting.
+        console.log('[GeminiParser] Clicked citation button(s), deferring extraction to allow anchors to populate')
         return []
-      } else {
-        // Panel was already open, so query again immediately
-        if (sourceDetailAnchorSelector) {
-          sourceDetailAnchors = Array.from(document.querySelectorAll(sourceDetailAnchorSelector))
-          console.log(
-            `[GeminiParser] Panel was already open, found ${sourceDetailAnchors.length} source detail anchors`,
-          )
-        }
-
-        // If detail anchors are still missing, progressively click citation chips
-        // to force Gemini to populate side-panel source links.
-        if (sourceDetailAnchors.length === 0 && currentResponseId && latestTurnCitationButtons.length > 0) {
-          const clicked = this.clickedSourceButtonsByResponse.get(currentResponseId) || new Set<string>()
-          this.clickedSourceButtonsByResponse.set(currentResponseId, clicked)
-
-          let clickedAny = false
-          latestTurnCitationButtons.forEach((button, index) => {
-            if (clickedAny) return
-
-            const aria = button.getAttribute('aria-label')?.trim() || ''
-            const text = button.textContent?.replace(/\s+/g, ' ').trim() || ''
-            const key = `${index}:${aria || text}`
-            if (clicked.has(key)) return
-
-            // Brief 100ms delay before clicking citation button (allows initial render)
-            const CITATION_CLICK_DELAY_MS = 100
-            setTimeout(() => {
-              ;(button as HTMLElement).click()
-              console.log(`[GeminiParser] Clicked citation button to hydrate detail links: ${aria || text || key}`)
-            }, CITATION_CLICK_DELAY_MS)
-            clicked.add(key)
-            clickedAny = true
-          })
-
-          if (clickedAny) {
-            // Let Gemini render updated side-panel anchors before extracting.
-            return []
-          }
-        }
       }
+    }
+
+    // Now query for populated detail anchors
+    if (sourceDetailAnchorSelector && sourceDetailAnchors.length === 0) {
+      sourceDetailAnchors = Array.from(document.querySelectorAll(sourceDetailAnchorSelector))
+      console.log(
+        `[GeminiParser] After clicking citations, found ${sourceDetailAnchors.length} source detail anchors`,
+      )
     }
     sourceDetailAnchors.forEach((anchor) => {
       const url = extractUrlFromElement(anchor)
@@ -676,10 +668,16 @@ export class GeminiParser {
 
     const hasUrlSourceFinal = dedupedSources.some((source) => !!source.source_url)
 
-    // Panel open/close is now decoupled from response ID tracking
+    // Close panel immediately if we opened it in this extraction
     if (openedByParser) {
-      closeSourcesPanel()
-      console.log('[GeminiParser] Closed sources panel after extraction (was opened by parser in this call)')
+      const closeSelector = this.resolveSelector('sourceCloseButton')
+      if (closeSelector) {
+        const closeButton = document.querySelector(closeSelector) as HTMLElement | null
+        if (closeButton) {
+          closeButton.click()
+          console.log('[GeminiParser] Closed sources panel after extraction')
+        }
+      }
     }
 
     // Only mark response as complete once we have at least one URL-backed source.
