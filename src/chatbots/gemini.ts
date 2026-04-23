@@ -57,7 +57,8 @@ export class GeminiParser {
   private panelOpenedByParserForResponseId: string | undefined = undefined
   private clickedSourceButtonsByResponse = new Map<string, Set<string>>()
   private selectorValidationError: string | null = null
-  private questionTimestampCache = new Map<string, number>()
+  private responseContainerTimestamps = new Map<Element, number>()
+  private lastResponseContainer: Element | undefined = undefined
 
   constructor(config?: GeminiConfig) {
     // Config-only selectors: missing values are handled with warnings at call sites.
@@ -274,42 +275,6 @@ export class GeminiParser {
       .reverse()
       .find((i) => i.type === 'question')?.content
 
-    // Create response ID from latest question + cached timestamp
-    // Cache is populated when question is first seen, ensuring stable ID for all extractions
-    let currentResponseId: string | undefined = undefined
-    if (latestQuestion) {
-      if (!this.questionTimestampCache.has(latestQuestion)) {
-        // First time seeing this question - capture timestamp once
-        this.questionTimestampCache.set(latestQuestion, Date.now())
-      }
-      const timestamp = this.questionTimestampCache.get(latestQuestion)!
-      currentResponseId = `${latestQuestion}:${timestamp}`
-    }
-
-    // Skip if we've already extracted sources for this response
-    if (currentResponseId === this.lastExtractedResponseId) {
-      console.log('[GeminiParser] Skipping source extraction - already completed for this response')
-      return []
-    }
-
-    // ANCHOR: Check for copy button to confirm response is fully rendered
-    const copyActionSelector = this.resolveSelector('copyAction')
-    if (!copyActionSelector) {
-      console.log('[GeminiParser] Copy button selector not available')
-      return []
-    }
-
-    const copyButton = document.querySelector(copyActionSelector) as HTMLElement | null
-    if (!copyButton) {
-      console.log('[GeminiParser] Response not ready - copy button not found')
-      return []
-    }
-
-    console.log(`[GeminiParser] Starting source extraction for response (ID: ${currentResponseId})`)
-
-    const sources: ExtractedSource[] = []
-    const seen = new Set<string>()
-
     // Get latest response container for querying source elements
     const responseContainerSelector = this.resolveSelector('responseContainer')
     if (!responseContainerSelector) {
@@ -326,7 +291,22 @@ export class GeminiParser {
       return []
     }
 
-    console.log('[GeminiParser] Starting source extraction')
+    // Assign timestamp to new response containers (one timestamp per question instance)
+    if (!this.responseContainerTimestamps.has(latestResponseContainer)) {
+      this.responseContainerTimestamps.set(latestResponseContainer, Date.now())
+    }
+
+    const containerTimestamp = this.responseContainerTimestamps.get(latestResponseContainer)!
+    const currentResponseId = latestQuestion ? `${latestQuestion}:${containerTimestamp}` : undefined
+
+    // Skip if we've already extracted sources for this response
+    if (currentResponseId === this.lastExtractedResponseId) {
+      console.log('[GeminiParser] Skipping source extraction - already completed for this response')
+      return []
+    }
+
+    // Use latest response container to scope all DOM queries to this question's context
+    this.lastResponseContainer = latestResponseContainer
     console.log('[GeminiParser] Config selectors:', {
       sourceAnchors: this.selectors.sourceAnchors,
       sourceButtons: this.selectors.sourceButtons,
