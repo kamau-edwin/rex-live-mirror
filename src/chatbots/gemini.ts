@@ -57,6 +57,7 @@ export class GeminiParser {
   private panelOpenedByParserForResponseId: string | undefined = undefined
   private clickedSourceButtonsByResponse = new Map<string, Set<string>>()
   private selectorValidationError: string | null = null
+  private questionTimestampCache = new Map<string, number>()
 
   constructor(config?: GeminiConfig) {
     // Config-only selectors: missing values are handled with warnings at call sites.
@@ -273,10 +274,17 @@ export class GeminiParser {
       .reverse()
       .find((i) => i.type === 'question')?.content
 
-    // Create response ID from latest question + timestamp (rounded to nearest second)
-    // This ensures new questions get new IDs, preventing cross-question deduplication
-    const roundedTimestamp = Math.floor(Date.now() / 1000)
-    const currentResponseId = latestQuestion ? `${latestQuestion}:${roundedTimestamp}` : undefined
+    // Create response ID from latest question + cached timestamp
+    // Cache is populated when question is first seen, ensuring stable ID for all extractions
+    let currentResponseId: string | undefined = undefined
+    if (latestQuestion) {
+      if (!this.questionTimestampCache.has(latestQuestion)) {
+        // First time seeing this question - capture timestamp once
+        this.questionTimestampCache.set(latestQuestion, Date.now())
+      }
+      const timestamp = this.questionTimestampCache.get(latestQuestion)!
+      currentResponseId = `${latestQuestion}:${timestamp}`
+    }
 
     // Skip if we've already extracted sources for this response
     if (currentResponseId === this.lastExtractedResponseId) {
