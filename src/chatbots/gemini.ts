@@ -54,6 +54,7 @@ export class GeminiParser {
   private fallbackMode: GeminiFallbackMode
   private selectorFallbacks: GeminiSelectorFallbacks
   private lastExtractedResponseId: string | undefined = undefined
+  private panelOpenedByParserForResponseId: string | undefined = undefined
   private clickedSourceButtonsByResponse = new Map<string, Set<string>>()
   private selectorValidationError: string | null = null
 
@@ -462,22 +463,14 @@ export class GeminiParser {
         return
       }
 
-      // Brief 100ms delay to ensure extraction completes, then close panel quickly (total ~200-300ms)
-      const SOURCES_CLOSE_DELAY_MS = 100
-      setTimeout(() => {
-        const closeButton = document.querySelector(closeSelector) as HTMLElement | null
-        if (closeButton) {
-          console.log(`[GeminiParser] Found close button with selector: ${closeSelector}`)
-        }
-
-        if (!closeButton) {
-          console.warn('[GeminiParser] Could not find close button for sources sidebar')
-          return
-        }
-
+      // Close immediately - 500ms budget enforced in extractSources timing logic
+      const closeButton = document.querySelector(closeSelector) as HTMLElement | null
+      if (closeButton) {
         closeButton.click()
-        console.log('[GeminiParser] Clicked to close sources sidebar after rapid extraction')
-      }, SOURCES_CLOSE_DELAY_MS)
+        console.log('[GeminiParser] Closed sources panel (extraction complete)')
+      } else {
+        console.warn('[GeminiParser] Could not find close button for sources sidebar')
+      }
     }
 
     // Prefer explicit source links when present (scoped to latest response turn).
@@ -537,46 +530,61 @@ export class GeminiParser {
 
     let openedByParser = false
     if (sourceDetailAnchors.length === 0) {
-      // Gemini may require opening the Sources panel before detail links are rendered.
-      console.log('[GeminiParser] No detail anchors found, attempting to open sources panel')
+      // 500ms total budget: open -> hydrate -> extract -> close
+      const EXTRACTION_BUDGET_MS = 500
+      const extractionStartTime = Date.now()
+      
+      console.log('[GeminiParser] No detail anchors found, opening sources panel for rapid extraction (500ms budget)')
       openedByParser = maybeOpenSourcesPanel()
       
-      // After opening panel, click citation buttons to hydrate detail anchors
-      // (detail anchors won't exist until we interact with citation buttons)
-    }
-    
-    if (sourceDetailAnchors.length === 0 && currentResponseId && latestTurnCitationButtons.length > 0) {
-      const clicked = this.clickedSourceButtonsByResponse.get(currentResponseId) || new Set<string>()
-      this.clickedSourceButtonsByResponse.set(currentResponseId, clicked)
-
-      let clickedAny = false
-      latestTurnCitationButtons.forEach((button, index) => {
-        if (clickedAny) return
-
-        const aria = button.getAttribute('aria-label')?.trim() || ''
-        const text = button.textContent?.replace(/\s+/g, ' ').trim() || ''
-        const key = `${index}:${aria || text}`
-        if (clicked.has(key)) return
-
-        ;(button as HTMLElement).click()
-        console.log(`[GeminiParser] Clicked citation button to hydrate detail links: ${aria || text || key}`)
-        clicked.add(key)
-        clickedAny = true
-      })
-
-      if (clickedAny) {
-        // Let Gemini render updated side-panel anchors before extracting.
-        console.log('[GeminiParser] Clicked citation button(s), deferring extraction to allow anchors to populate')
-        return []
+      if (openedByParser && currentResponseId) {
+        this.panelOpenedByParserForResponseId = currentResponseId
+        
+        // Remaining budget after open
+        const afterOpenMs = Date.now() - extractionStartTime
+        const remainingAfterOpen = EXTRACTION_BUDGET_MS - afterOpenMs
+        
+        // Allocate 60% of remaining time for hydration, 40% for safety margin
+        const hydrationTimeMs = Math.floor(remainingAfterOpen * 0.6)
+        const hydrationStart = Date.now()
+        
+        // Busy-wait for detail anchors with time constraint
+        while (Date.now() - hydrationStart < hydrationTimeMs) {
+          if (sourceDetailAnchorSelector) {
+            sourceDetailAnchors = Array.from(document.querySelectorAll(sourceDetailAnchorSelector))
+            if (sourceDetailAnchors.length > 0) {
+              console.log(`[GeminiParser] Found ${sourceDetailAnchors.length} detail anchors after panel open`)
+              break
+            }
+          }
+        }
+        
+        // If still no detail anchors, try clicking first citation button (within time budget)
+        if (sourceDetailAnchors.length === 0 && latestTurnCitationButtons.length > 0) {
+          const elapsedMs = Date.now() - extractionStartTime
+          if (elapsedMs < EXTRACTION_BUDGET_MS - 100) { // Ensure 100ms remains
+            const firstButton = latestTurnCitationButtons[0]
+            const aria = firstButton.getAttribute('aria-label')?.trim() || ''
+            ;(firstButton as HTMLElement).click()
+            console.log(`[GeminiParser] Clicked citation button to hydrate detail anchors: ${aria}`)
+            
+            // Wait for hydration with remaining time
+            const clickTime = Date.now()
+            const remainingMs = EXTRACTION_BUDGET_MS - (clickTime - extractionStartTime)
+            const clickWaitMs = Math.min(100, remainingMs - 50) // Reserve 50ms for extraction/close
+            
+            while (Date.now() - clickTime < clickWaitMs) {
+              if (sourceDetailAnchorSelector) {
+                sourceDetailAnchors = Array.from(document.querySelectorAll(sourceDetailAnchorSelector))
+                if (sourceDetailAnchors.length > 0) {
+                  console.log(`[GeminiParser] Found ${sourceDetailAnchors.length} detail anchors after button click`)
+                  break
+                }
+              }
+            }
+          }
+        }
       }
-    }
-
-    // Now query for populated detail anchors
-    if (sourceDetailAnchorSelector && sourceDetailAnchors.length === 0) {
-      sourceDetailAnchors = Array.from(document.querySelectorAll(sourceDetailAnchorSelector))
-      console.log(
-        `[GeminiParser] After clicking citations, found ${sourceDetailAnchors.length} source detail anchors`,
-      )
     }
     sourceDetailAnchors.forEach((anchor) => {
       const url = extractUrlFromElement(anchor)
@@ -668,14 +676,15 @@ export class GeminiParser {
 
     const hasUrlSourceFinal = dedupedSources.some((source) => !!source.source_url)
 
-    // Close panel immediately if we opened it in this extraction
-    if (openedByParser) {
+    // Close panel immediately if we opened it for this response (within 500ms total budget)
+    if (currentResponseId && this.panelOpenedByParserForResponseId === currentResponseId) {
       const closeSelector = this.resolveSelector('sourceCloseButton')
       if (closeSelector) {
         const closeButton = document.querySelector(closeSelector) as HTMLElement | null
         if (closeButton) {
           closeButton.click()
-          console.log('[GeminiParser] Closed sources panel after extraction')
+          console.log('[GeminiParser] Closed sources panel (opened by parser)')
+          this.panelOpenedByParserForResponseId = undefined
         }
       }
     }
