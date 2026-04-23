@@ -199,52 +199,36 @@ export class GeminiParser {
 
     const interactions: ParsedInteraction[] = []
 
-    const responseContainerSelector = this.resolveSelector('responseContainer')
-    const responseContainers = responseContainerSelector ? Array.from(document.querySelectorAll(responseContainerSelector)) : []
-    const latestResponseContainer =
-      responseContainers.length > 0 ? (responseContainers[responseContainers.length - 1] as Element) : undefined
-
-    const extractLatestText = (selector?: string): string | undefined => {
-      if (!selector) {
-        return undefined
-      }
-
-      if (latestResponseContainer) {
-        const scopedMatches = Array.from(latestResponseContainer.querySelectorAll(selector))
-        const scoped = scopedMatches.length > 0 ? (scopedMatches[scopedMatches.length - 1] as Element) : undefined
-        const scopedText = scoped?.textContent?.trim()
-        if (scopedText) {
-          return scopedText
+    // Find user messages using config selector
+    if (this.selectors.userMessage) {
+      const userMessages = document.querySelectorAll(this.selectors.userMessage)
+      console.log(`[GeminiParser] Found ${userMessages.length} user message elements`)
+      userMessages.forEach((msg) => {
+        const rawContent = msg.textContent?.trim()
+        const content = rawContent ? this.normalizeQuestion(rawContent) : undefined
+        if (content) {
+          interactions.push({
+            type: 'question',
+            content,
+          })
         }
-      }
-
-      const globalMatches = Array.from(document.querySelectorAll(selector))
-      const global = globalMatches.length > 0 ? (globalMatches[globalMatches.length - 1] as Element) : undefined
-      return global?.textContent?.trim() || undefined
-    }
-
-    const latestQuestionRaw = extractLatestText(this.selectors.userMessage)
-    const latestQuestion = latestQuestionRaw ? this.normalizeQuestion(latestQuestionRaw) : undefined
-    if (latestQuestion) {
-      interactions.push({
-        type: 'question',
-        content: latestQuestion,
       })
     }
 
-    const latestResponse = extractLatestText(this.selectors.assistantMessage)
-    if (latestResponse) {
-      interactions.push({
-        type: 'response',
-        content: latestResponse,
+    // Find assistant messages using config selector
+    if (this.selectors.assistantMessage) {
+      const assistantMessages = document.querySelectorAll(this.selectors.assistantMessage)
+      console.log(`[GeminiParser] Found ${assistantMessages.length} assistant message elements`)
+      assistantMessages.forEach((msg) => {
+        const content = msg.textContent?.trim()
+        if (content) {
+          interactions.push({
+            type: 'response',
+            content,
+          })
+        }
       })
     }
-
-    console.log('[GeminiParser] Latest-turn extraction:', {
-      hasQuestion: !!latestQuestion,
-      hasResponse: !!latestResponse,
-      hasContainer: !!latestResponseContainer,
-    })
 
     return interactions
   }
@@ -304,16 +288,6 @@ export class GeminiParser {
 
     if (!latestResponseContainer) {
       console.warn('[GeminiParser] No response containers found')
-      return []
-    }
-
-    const copyActionSelector = this.resolveSelector('copyAction')
-    if (!copyActionSelector) {
-      console.warn('[GeminiParser] Missing config selector: copyAction')
-      return []
-    }
-    if (!latestResponseContainer.querySelector(copyActionSelector)) {
-      console.log('[GeminiParser] Response not ready for source extraction (copy action missing)')
       return []
     }
 
@@ -444,22 +418,28 @@ export class GeminiParser {
       return undefined
     }
 
-    const maybeOpenSourcesPanel = (toggle?: Element): boolean => {
-      if (!toggle) {
+    const maybeOpenSourcesPanel = (): boolean => {
+      const toggleSelector = this.resolveSelector('sourceToggleButton')
+      if (!toggleSelector) {
         console.warn('[GeminiParser] Missing config selector: sourceToggleButton')
         return false
       }
-      const toggleElement = toggle as HTMLElement
+      const toggle = document.querySelector(toggleSelector) as HTMLElement | null
+      if (!toggle) {
+        console.warn(`[GeminiParser] Toggle button not found with selector: ${toggleSelector}`)
+        return false
+      }
 
-      const className = toggleElement.getAttribute('class') || ''
+      const className = toggle.getAttribute('class') || ''
       const alreadySelected = /\bselected\b/i.test(className)
-      const ariaExpanded = (toggleElement.getAttribute('aria-expanded') || '').toLowerCase() === 'true'
+      const ariaExpanded = (toggle.getAttribute('aria-expanded') || '').toLowerCase() === 'true'
       if (alreadySelected || ariaExpanded) {
         console.log('[GeminiParser] Sources panel already open, skipping toggle click')
         return false
       }
 
-      toggleElement.click()
+      // Immediate click - open sources panel for rapid extraction (sub-500ms total visible)
+      toggle.click()
       console.log('[GeminiParser] Clicked sources toggle to reveal source URLs')
       return true
     }
@@ -536,12 +516,9 @@ export class GeminiParser {
 
     let openedByParser = false
     if (sourceDetailAnchors.length === 0) {
-      if (sourceToggleSelector && hasFooterSourceToggleInLatestTurn) {
-        const togglesInTurn = queryWithinLatestTurn(sourceToggleSelector)
-        const latestTurnToggle = togglesInTurn.length > 0 ? togglesInTurn[togglesInTurn.length - 1] : undefined
-        console.log('[GeminiParser] No detail anchors found, checking latest-turn source button')
-        openedByParser = maybeOpenSourcesPanel(latestTurnToggle)
-      }
+      // Open panel only if source button exists
+      console.log('[GeminiParser] No detail anchors found, checking for source button')
+      openedByParser = maybeOpenSourcesPanel()
       
       if (openedByParser && currentResponseId) {
         this.panelOpenedByParserForResponseId = currentResponseId
@@ -707,7 +684,6 @@ export class GeminiParser {
       }
 
       console.log('[GeminiParser] No URL-backed sources found yet - will retry on next mutation')
-      return []
     }
 
     return dedupedSources
