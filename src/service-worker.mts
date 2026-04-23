@@ -10,6 +10,7 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
   private chatGPTCaptureManager: ChatGPTCaptureManager | null = null
   private transmittedHashes: Set<string> = new Set() // Track transmitted interactions to prevent duplicates
   private transmittedQaHashes: Set<string> = new Set() // Track emitted Q&A pairs across uploads/restarts
+  private transmittedQaHashesWithSources: Set<string> = new Set() // Track which Q&A hashes were transmitted with sources
   private readonly QA_HASH_STORAGE_KEY: string = 'llm_transmitted_qa_hashes'
   private readonly QA_HASH_MAX_SIZE: number = 1000
   private pendingQuestionByConversation: Map<string, any> = new Map()
@@ -139,6 +140,13 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
 
   private handleInteractionBatch(interactions: any[]): void {
     console.log(`[LLM Chatbot] Service Worker received batch of ${interactions.length} interactions`)
+    
+    // DEBUG: Log what we actually received
+    for (const interaction of interactions) {
+      if (interaction.type === 'response') {
+        console.log(`[LLM Chatbot] DEBUG - Received response with sources: ${JSON.stringify(interaction.sources ? interaction.sources.length + ' sources' : 'NO SOURCES')}`)
+      }
+    }
 
     // Filter out already-transmitted interactions
     const newInteractions = interactions.filter(interaction => {
@@ -193,11 +201,20 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
           const qaHash = this.hashQaPair(pendingQuestion, interaction)
 
           if (this.transmittedQaHashes.has(qaHash)) {
-            markTransmitted(pendingQuestion)
-            markTransmitted(interaction)
-            this.pendingQuestionByConversation.delete(conversationKey)
-            console.log(`[LLM Chatbot] Skipped duplicate qa_pair from ${interaction.source} (conversation: ${interaction.conversation_id})`)
-            continue
+            // Allow re-transmission if sources were enriched after initial dispatch
+            const hasNewSources = interaction.sources && interaction.sources.length > 0
+            const hadSourcesOnInitialTransmit = this.transmittedQaHashesWithSources.has(qaHash)
+            
+            if (!hasNewSources || hadSourcesOnInitialTransmit) {
+              // Skip: either no new sources, or sources were already present before
+              markTransmitted(pendingQuestion)
+              markTransmitted(interaction)
+              this.pendingQuestionByConversation.delete(conversationKey)
+              console.log(`[LLM Chatbot] Skipped duplicate qa_pair from ${interaction.source} (conversation: ${interaction.conversation_id})`)
+              continue
+            }
+            // Fall through: Allow re-transmission with newly-enriched sources
+            console.log(`[LLM Chatbot] Re-transmitting qa_pair with newly-enriched sources (${interaction.sources.length} sources)`)
           }
 
           // Emit a combined Q/A event for live capture.
@@ -226,10 +243,17 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
           markTransmitted(interaction)
           this.pendingQuestionByConversation.delete(conversationKey)
           this.transmittedQaHashes.add(qaHash)
+          
+          // Track if this hash was transmitted with sources
+          if (interaction.sources && interaction.sources.length > 0) {
+            this.transmittedQaHashesWithSources.add(qaHash)
+          }
+          
           if (this.transmittedQaHashes.size > this.QA_HASH_MAX_SIZE) {
             const oldest = this.transmittedQaHashes.values().next().value
             if (oldest) {
               this.transmittedQaHashes.delete(oldest)
+              this.transmittedQaHashesWithSources.delete(oldest) // Also clean up sources tracking
             }
           }
           this.persistQaHashes()

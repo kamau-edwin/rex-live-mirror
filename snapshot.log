@@ -1,0 +1,19 @@
+#!/bin/bash
+# Step 1: Create an orphan branch (no parent commits)
+git checkout --orphan new_root
+
+# Step 2: Stage all files
+git add -A
+
+# Step 3: Create initial commit with fresh history
+git commit -m "Initial commit with fresh history"
+
+# Step 4: Rename the branch to main
+git branch -M main
+
+# Step 5: Force push to remote to update it
+git push -f origin main
+
+# Step 6: Verify the reset
+git log --oneline -1
+git status
