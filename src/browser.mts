@@ -20,6 +20,8 @@ export interface LLMInteraction {
   url: string
   conversation_id?: string  // ChatGPT conversation ID (extracted from URL when available)
   sources?: ExtractedSource[]  // Citation sources extracted from response
+  panelCycleConfirmed?: boolean  // MutationObserver validation: did panel open→close?
+  panelCycleTimestamp?: { opened: number; closed: number; duration: number }  // Timing proof
 }
 
 /**
@@ -38,6 +40,11 @@ class LLMChatbotBrowserModule extends REXClientModule {
   private parser: any = null
   private mutationObserver: MutationObserver | null = null
   private interactions: LLMInteraction[] = []
+  // Track responses pending source extraction: key = prefixKey, value = { interaction, createdAt, extractionAttempted }
+  private pendingSourcesExtraction: Map<string, { interaction: LLMInteraction; createdAt: number; extractionAttempted: boolean }> = new Map()
+  private readonly PENDING_SOURCES_TIMEOUT_MS = 5000  // Max 5s wait for sources before forcing transmission
+  private pendingSourcesCheckTimer: ReturnType<typeof setInterval> | null = null
+  private safetyTransmitTimer: ReturnType<typeof setInterval> | null = null
   // Track captured content by prefix for update detection
   // Key: type + first N chars (normalized), Value: { interaction_id, length }
   private capturedPrefixes: Map<string, CapturedInteractionInfo> = new Map()
@@ -220,16 +227,24 @@ class LLMChatbotBrowserModule extends REXClientModule {
       // Initial page processing (with small delay to let page settle)
       setTimeout(() => this.processPage(), 1000)
 
-      // Periodic batch transmission
-      setInterval(() => {
-        try {
-          this.transmitBatch()
-        } catch (error) {
-          console.error('[LLM Chatbot Browser] Error in transmission interval:', error)
-        }
-      }, this.transmissionInterval)
+      // Removed: was causing continuous re-extraction loops
+      // promoteReadyResponses() is now called directly when responses are added to pending queue
 
-      console.log('[LLM Chatbot Browser] Transmission interval set:', this.transmissionInterval, 'ms')
+      // Safety fallback: Force transmission if items pending too long (every 10s)
+      this.safetyTransmitTimer = setInterval(() => {
+        try {
+          if (this.interactions.length > 0) {
+            console.log(`[LLM Chatbot Browser] Safety timer: ${this.interactions.length} interactions waiting, forcing transmission`)
+            this.transmitBatch()
+          }
+          // Also force-promote stale pending responses (older than timeout)
+          this.forcePromoteStalePendingResponses()
+        } catch (error) {
+          console.error('[LLM Chatbot Browser] Error in safety transmission:', error)
+        }
+      }, 10000)
+
+      console.log('[LLM Chatbot Browser] Event-driven transmission started (sources check: 200ms, safety: 10s)')
     } catch (error) {
       console.error('[LLM Chatbot Browser] Error starting capture:', error)
     }
@@ -437,19 +452,6 @@ class LLMChatbotBrowserModule extends REXClientModule {
         }
       }
 
-      // Extract sources once per page processing (for responses)
-      let extractedSources: ExtractedSource[] = []
-      if (hasResponse && typeof this.parser.extractSources === 'function') {
-        try {
-          extractedSources = this.parser.extractSources()
-          if (extractedSources.length > 0) {
-            console.log(`[LLM Chatbot Browser] Extracted ${extractedSources.length} sources from page`)
-          }
-        } catch (error) {
-          console.error('[LLM Chatbot Browser] Error extracting sources:', error)
-        }
-      }
-
       let newCaptureCount = 0
       let updateCount = 0
       for (const interaction of newInteractions) {
@@ -460,6 +462,31 @@ class LLMChatbotBrowserModule extends REXClientModule {
           !this.parser.isResponseComplete()
         ) {
           continue
+        }
+
+        // Extract sources immediately if this is a response (don't wait until transmission)
+        let extractedSources: ExtractedSource[] = []
+        if (interaction.type === 'response' && typeof this.parser.extractSources === 'function') {
+          try {
+            // Check if sources button is available in DOM - button with class "legacy-sources-sidebar-button" 
+            // contains the mat-icon with fonticon="link" when sources exist
+            const sourcesButton = document.querySelector('button.legacy-sources-sidebar-button')
+            
+            if (sourcesButton) {
+              extractedSources = this.parser.extractSources()
+              if (extractedSources.length > 0) {
+                console.log(`[LLM Chatbot Browser] Extracted ${extractedSources.length} sources immediately for response (sources button detected in DOM)`)
+                // Close the sources panel after extraction completes
+                if (typeof this.parser.closeSourcesPanel === 'function') {
+                  this.parser.closeSourcesPanel()
+                }
+              }
+            } else {
+              console.log(`[LLM Chatbot Browser] Response detected but sources button not yet available in DOM`)
+            }
+          } catch (error) {
+            console.error('[LLM Chatbot Browser] Error extracting sources immediately:', error)
+          }
         }
 
         // Generate prefix key for this content
@@ -486,7 +513,10 @@ class LLMChatbotBrowserModule extends REXClientModule {
             length: currentLength,
             url: window.location.href,
             conversation_id: this.getEffectiveConversationId(),
-            sources: interaction.type === 'response' ? extractedSources : undefined,
+            sources: interaction.type === 'response' ? extractedSources : [],
+          }
+          if (newInteraction.type === 'response') {
+            console.log(`[LLM Chatbot Browser] Response update created with ${newInteraction.sources?.length || 0} sources`)
           }
 
           // Update the map with new ID and length
@@ -509,11 +539,39 @@ class LLMChatbotBrowserModule extends REXClientModule {
             length: currentLength,
             url: window.location.href,
             conversation_id: this.getEffectiveConversationId(),
-            sources: interaction.type === 'response' ? extractedSources : undefined,
+            sources: interaction.type === 'response' ? extractedSources : [],
+          }
+          if (newInteraction.type === 'response') {
+            console.log(`[LLM Chatbot Browser] Response created with ${newInteraction.sources?.length || 0} sources`)
           }
 
           this.capturedPrefixes.set(prefixKey, { interaction_id: newId, length: currentLength })
-          this.interactions.push(newInteraction)
+          
+          // For responses without sources extracted, hold only for parsers that use a source toggle panel (Gemini).
+          const hasPanelSourceToggle = !!this.parser?.selectors?.sourceToggleButton
+          if (
+            newInteraction.type === 'response' &&
+            hasPanelSourceToggle &&
+            (!newInteraction.sources || newInteraction.sources.length === 0)
+          ) {
+            console.log(`[LLM Chatbot Browser] Response deferred to pending queue (will attempt extraction once)`)
+            this.pendingSourcesExtraction.set(prefixKey, { 
+              interaction: newInteraction, 
+              createdAt: Date.now(),
+              extractionAttempted: false
+            })
+            // Immediately attempt extraction (single pass, no timer loop)
+            this.promoteReadyResponses()
+          } else {
+            // Questions or responses with sources go directly to transmission queue
+            this.interactions.push(newInteraction)
+            // Check if we should transmit now (batch full or ready to send)
+            if (this.interactions.length >= this.batchSize) {
+              console.log(`[LLM Chatbot Browser] Batch full (${this.interactions.length}), triggering transmission`)
+              this.transmitBatch()
+            }
+          }
+          
           newCaptureCount++
 
           console.log(
@@ -529,6 +587,218 @@ class LLMChatbotBrowserModule extends REXClientModule {
     } catch (error) {
       console.error('[LLM Chatbot Browser] Error processing page:', error)
     }
+  }
+
+  /**
+   * Check pending responses and promote when sources are ready to extract.
+   * Sources button appears after response is fully rendered, so checking for
+   * sources button visibility is sufficient. Extraction attempted only once per response.
+   * Also collects MutationObserver panel lifecycle validation.
+   */
+  private promoteReadyResponses(): void {
+    const now = Date.now()
+    const toRemove: string[] = []
+    let promotedCount = 0
+
+    for (const [prefixKey, pending] of this.pendingSourcesExtraction.entries()) {
+      const timePending = now - pending.createdAt
+      
+      // Check if sources button is visible (sources ready to extract) for panel-based parsers only.
+      const sourcesButtonSelector = this.parser?.selectors?.sourceToggleButton
+
+      // Non-panel chatbots (no sourceToggleButton configured) should not wait on Gemini-specific selectors.
+      if (!sourcesButtonSelector) {
+        this.interactions.push(pending.interaction)
+        promotedCount++
+        toRemove.push(prefixKey)
+        console.log('[LLM Chatbot Browser] No source toggle selector for parser - promoting response immediately')
+
+        if (this.interactions.length >= this.batchSize) {
+          console.log(`[LLM Chatbot Browser] Batch full after promotion, triggering transmission`)
+          this.transmitBatch()
+        }
+        continue
+      }
+
+      const sourcesButtonVisible = !!document.querySelector(sourcesButtonSelector)
+      
+      // Wait for sources button to become visible
+      if (!sourcesButtonVisible) {
+        continue // Not ready yet, skip this response
+      }
+      
+      // Attempt extraction ONCE when sources button becomes visible
+      if (!pending.extractionAttempted) {
+        pending.extractionAttempted = true
+        
+        // Start panel lifecycle observer (runs concurrently with extraction)
+        // This validates that panel opens→closes during extraction
+        const panelCyclePromise = this.watchPanelLifecycle(pending.interaction.interaction_id, 500)
+        
+        if (this.parser && typeof this.parser.extractSources === 'function') {
+          try {
+            const updatedSources = this.parser.extractSources()
+            if (updatedSources && updatedSources.length > 0) {
+              pending.interaction.sources = updatedSources
+              console.log(
+                `[LLM Chatbot Browser] Extracted ${updatedSources.length} sources (waited ${timePending}ms)`,
+              )
+            } else {
+              console.log(`[LLM Chatbot Browser] No sources found despite button visible (waited ${timePending}ms)`)
+            }
+          } catch (error) {
+            console.error(`[LLM Chatbot Browser] Error extracting sources:`, error)
+          }
+        }
+
+        // Attach panel cycle result (will resolve within extraction window or timeout)
+        // Don't wait for it - attach whenever it resolves
+        panelCyclePromise.then((result) => {
+          pending.interaction.panelCycleConfirmed = result.confirmed
+          if (result.timing) {
+            pending.interaction.panelCycleTimestamp = result.timing
+            console.log(
+              `[LLM Chatbot Browser] Panel cycle validated: open→close in ${result.timing.duration}ms`,
+            )
+          }
+        }).catch((err) => {
+          console.error(`[LLM Chatbot Browser] Panel observation error:`, err)
+        })
+      }
+      
+      // Promote to transmission queue (sources may be empty or populated, both okay)
+      this.interactions.push(pending.interaction)
+      promotedCount++
+      toRemove.push(prefixKey)
+      console.log(
+        `[LLM Chatbot Browser] Promoted response to transmission (${pending.interaction.sources?.length || 0} sources, panel cycle: ${pending.interaction.panelCycleConfirmed !== undefined ? pending.interaction.panelCycleConfirmed : 'pending'})`,
+      )
+      
+      // Check if batch full after promotion
+      if (this.interactions.length >= this.batchSize) {
+        console.log(`[LLM Chatbot Browser] Batch full after promotion, triggering transmission`)
+        this.transmitBatch()
+      }
+    }
+
+    // Clean up promoted responses
+    for (const key of toRemove) {
+      this.pendingSourcesExtraction.delete(key)
+    }
+    
+    if (promotedCount > 0) {
+      console.log(`[LLM Chatbot Browser] Promoted ${promotedCount} responses (sources button detected)`)
+    }
+  }
+
+  /**
+   * Force-promote responses that have been waiting >5s even if no sources found
+   * This prevents stalled responses from blocking transmission forever
+   */
+  private forcePromoteStalePendingResponses(): void {
+    const now = Date.now()
+    const toRemove: string[] = []
+    let forcedCount = 0
+
+    for (const [prefixKey, pending] of this.pendingSourcesExtraction.entries()) {
+      const timePending = now - pending.createdAt
+
+      // If waiting longer than timeout, force promote even without sources
+      if (timePending > this.PENDING_SOURCES_TIMEOUT_MS) {
+        console.log(`[LLM Chatbot Browser] FORCE-PROMOTED: Response waited ${timePending}ms (timeout), promoting without sources`)
+        this.interactions.push(pending.interaction)
+        forcedCount++
+        toRemove.push(prefixKey)
+        
+        // Check if batch full after promotion
+        if (this.interactions.length >= this.batchSize) {
+          console.log(`[LLM Chatbot Browser] Batch full after force-promotion, triggering transmission`)
+          this.transmitBatch()
+        }
+      }
+    }
+
+    // Clean up force-promoted responses
+    for (const key of toRemove) {
+      this.pendingSourcesExtraction.delete(key)
+    }
+  }
+
+  /**
+   * Watch for sources panel open→close cycle using MutationObserver.
+   * Returns validation result and timing proof without capturing data.
+   * MO responsibility: Confirm panel lifecycle, not extract content.
+   */
+  private async watchPanelLifecycle(
+    responseId: string,
+    timeoutMs: number = 500,
+  ): Promise<{ confirmed: boolean; timing?: { opened: number; closed: number; duration: number } }> {
+    return new Promise((resolve) => {
+      const panelSelector = this.parser?.selectors?.sourceToggleButton || 'button.legacy-sources-sidebar-button'
+      const containerSelector = this.parser?.selectors?.responseContainer || '.conversation-container model-response'
+      
+      let panelOpenTime: number | null = null
+      let resolved = false
+
+      // Timeout fallback
+      const timeoutHandle = setTimeout(() => {
+        if (!resolved) {
+          resolved = true
+          observer.disconnect()
+          console.log(`[LLM Chatbot Browser] Panel lifecycle timeout (${timeoutMs}ms): no open→close observed`)
+          resolve({ confirmed: false })
+        }
+      }, timeoutMs)
+
+      const observer = new MutationObserver((mutations) => {
+        if (resolved) return
+
+        for (const mutation of mutations) {
+          // Check for panel container addition
+          if (mutation.type === 'childList' && mutation.target instanceof Element) {
+            // Panel opening: check if sources container appeared
+            const containers = (mutation.target as Element).querySelectorAll('[class*="sources"], [class*="sidebar"]')
+            if (containers.length > 0 && !panelOpenTime) {
+              panelOpenTime = Date.now()
+              console.log(`[LLM Chatbot Browser] Panel open detected (MO): ${responseId}`)
+            }
+
+            // Panel closing: check if sources container was removed
+            if (panelOpenTime && containers.length === 0) {
+              const closedTime = Date.now()
+              resolved = true
+              observer.disconnect()
+              clearTimeout(timeoutHandle)
+
+              console.log(`[LLM Chatbot Browser] Panel close detected (MO): ${responseId}`)
+              resolve({
+                confirmed: true,
+                timing: {
+                  opened: panelOpenTime,
+                  closed: closedTime,
+                  duration: closedTime - panelOpenTime,
+                },
+              })
+            }
+          }
+        }
+      })
+
+      // Start observing the response container for panel add/remove
+      const container = document.querySelector(containerSelector)
+      if (container) {
+        observer.observe(container, {
+          childList: true,
+          subtree: true,
+          attributes: false,
+          characterData: false,
+        })
+      } else {
+        console.warn(`[LLM Chatbot Browser] Could not find response container for panel observation: ${containerSelector}`)
+        resolved = true
+        resolve({ confirmed: false })
+      }
+    })
   }
 
   private sendBatchWithRetry(batch: LLMInteraction[], attempt: number = 1): void {
