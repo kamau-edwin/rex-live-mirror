@@ -284,6 +284,19 @@ export class GeminiParser {
       return []
     }
 
+    // ANCHOR: Check for copy button to confirm response is fully rendered
+    const copyActionSelector = this.resolveSelector('copyAction')
+    if (!copyActionSelector) {
+      console.log('[GeminiParser] Copy button selector not available')
+      return []
+    }
+
+    const copyButton = document.querySelector(copyActionSelector) as HTMLElement | null
+    if (!copyButton) {
+      console.log('[GeminiParser] Response not ready - copy button not found')
+      return []
+    }
+
     console.log(`[GeminiParser] Starting source extraction for response (ID: ${currentResponseId})`)
 
     const sources: ExtractedSource[] = []
