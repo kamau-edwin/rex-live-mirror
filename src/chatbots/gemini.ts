@@ -530,58 +530,30 @@ export class GeminiParser {
 
     let openedByParser = false
     if (sourceDetailAnchors.length === 0) {
-      // 500ms total budget: open -> hydrate -> extract -> close
-      const EXTRACTION_BUDGET_MS = 500
-      const extractionStartTime = Date.now()
-      
-      console.log('[GeminiParser] No detail anchors found, opening sources panel for rapid extraction (500ms budget)')
+      // Open panel to hydrate sources - 500ms total budget (open -> extract -> close)
+      console.log('[GeminiParser] No detail anchors found, opening sources panel for rapid extraction')
       openedByParser = maybeOpenSourcesPanel()
       
       if (openedByParser && currentResponseId) {
         this.panelOpenedByParserForResponseId = currentResponseId
         
-        // Remaining budget after open
-        const afterOpenMs = Date.now() - extractionStartTime
-        const remainingAfterOpen = EXTRACTION_BUDGET_MS - afterOpenMs
-        
-        // Allocate 60% of remaining time for hydration, 40% for safety margin
-        const hydrationTimeMs = Math.floor(remainingAfterOpen * 0.6)
-        const hydrationStart = Date.now()
-        
-        // Busy-wait for detail anchors with time constraint
-        while (Date.now() - hydrationStart < hydrationTimeMs) {
-          if (sourceDetailAnchorSelector) {
-            sourceDetailAnchors = Array.from(document.querySelectorAll(sourceDetailAnchorSelector))
-            if (sourceDetailAnchors.length > 0) {
-              console.log(`[GeminiParser] Found ${sourceDetailAnchors.length} detail anchors after panel open`)
-              break
-            }
-          }
+        // Query detail anchors immediately - they populate within ~50-100ms after open
+        if (sourceDetailAnchorSelector) {
+          sourceDetailAnchors = Array.from(document.querySelectorAll(sourceDetailAnchorSelector))
+          console.log(`[GeminiParser] Found ${sourceDetailAnchors.length} detail anchors after panel open`)
         }
         
-        // If still no detail anchors, try clicking first citation button (within time budget)
+        // If still no detail anchors, click first citation button to hydrate
         if (sourceDetailAnchors.length === 0 && latestTurnCitationButtons.length > 0) {
-          const elapsedMs = Date.now() - extractionStartTime
-          if (elapsedMs < EXTRACTION_BUDGET_MS - 100) { // Ensure 100ms remains
-            const firstButton = latestTurnCitationButtons[0]
-            const aria = firstButton.getAttribute('aria-label')?.trim() || ''
-            ;(firstButton as HTMLElement).click()
-            console.log(`[GeminiParser] Clicked citation button to hydrate detail anchors: ${aria}`)
-            
-            // Wait for hydration with remaining time
-            const clickTime = Date.now()
-            const remainingMs = EXTRACTION_BUDGET_MS - (clickTime - extractionStartTime)
-            const clickWaitMs = Math.min(100, remainingMs - 50) // Reserve 50ms for extraction/close
-            
-            while (Date.now() - clickTime < clickWaitMs) {
-              if (sourceDetailAnchorSelector) {
-                sourceDetailAnchors = Array.from(document.querySelectorAll(sourceDetailAnchorSelector))
-                if (sourceDetailAnchors.length > 0) {
-                  console.log(`[GeminiParser] Found ${sourceDetailAnchors.length} detail anchors after button click`)
-                  break
-                }
-              }
-            }
+          const firstButton = latestTurnCitationButtons[0]
+          const aria = firstButton.getAttribute('aria-label')?.trim() || ''
+          ;(firstButton as HTMLElement).click()
+          console.log(`[GeminiParser] Clicked citation button to hydrate detail anchors: ${aria}`)
+          
+          // Re-query after button click - will be available within next mutation event
+          if (sourceDetailAnchorSelector) {
+            sourceDetailAnchors = Array.from(document.querySelectorAll(sourceDetailAnchorSelector))
+            console.log(`[GeminiParser] Found ${sourceDetailAnchors.length} detail anchors after button click`)
           }
         }
       }
