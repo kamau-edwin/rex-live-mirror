@@ -547,8 +547,13 @@ class LLMChatbotBrowserModule extends REXClientModule {
 
           this.capturedPrefixes.set(prefixKey, { interaction_id: newId, length: currentLength })
           
-          // For responses without sources extracted, hold them until sources are ready
-          if (newInteraction.type === 'response' && (!newInteraction.sources || newInteraction.sources.length === 0)) {
+          // For responses without sources extracted, hold only for parsers that use a source toggle panel (Gemini).
+          const hasPanelSourceToggle = !!this.parser?.selectors?.sourceToggleButton
+          if (
+            newInteraction.type === 'response' &&
+            hasPanelSourceToggle &&
+            (!newInteraction.sources || newInteraction.sources.length === 0)
+          ) {
             console.log(`[LLM Chatbot Browser] Response deferred to pending queue (will attempt extraction once)`)
             this.pendingSourcesExtraction.set(prefixKey, { 
               interaction: newInteraction, 
@@ -598,8 +603,23 @@ class LLMChatbotBrowserModule extends REXClientModule {
     for (const [prefixKey, pending] of this.pendingSourcesExtraction.entries()) {
       const timePending = now - pending.createdAt
       
-      // Check if sources button is visible (sources ready to extract)
-      const sourcesButtonSelector = this.parser?.selectors?.sourceToggleButton || 'button.legacy-sources-sidebar-button'
+      // Check if sources button is visible (sources ready to extract) for panel-based parsers only.
+      const sourcesButtonSelector = this.parser?.selectors?.sourceToggleButton
+
+      // Non-panel chatbots (no sourceToggleButton configured) should not wait on Gemini-specific selectors.
+      if (!sourcesButtonSelector) {
+        this.interactions.push(pending.interaction)
+        promotedCount++
+        toRemove.push(prefixKey)
+        console.log('[LLM Chatbot Browser] No source toggle selector for parser - promoting response immediately')
+
+        if (this.interactions.length >= this.batchSize) {
+          console.log(`[LLM Chatbot Browser] Batch full after promotion, triggering transmission`)
+          this.transmitBatch()
+        }
+        continue
+      }
+
       const sourcesButtonVisible = !!document.querySelector(sourcesButtonSelector)
       
       // Wait for sources button to become visible

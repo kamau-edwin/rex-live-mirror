@@ -620,16 +620,51 @@ export class GeminiParser {
 
     const hasUrlSourceFinal = dedupedSources.some((source) => !!source.source_url)
 
-    // Close panel immediately if we opened it
-    if (currentResponseId && this.panelOpenedByParserForResponseId === currentResponseId) {
-      const closeSelector = this.resolveSelector('sourceCloseButton')
-      if (closeSelector) {
-        const closeButton = document.querySelector(closeSelector) as HTMLElement | null
+    const closeSourcesPanelIfOpen = (): void => {
+      const panelOpen =
+        !!document.querySelector('context-sidebar:not([aria-hidden="true"])') ||
+        !!document.querySelector('side-bar-sources:not([aria-hidden="true"])')
+      if (!panelOpen) {
+        return
+      }
+
+      const configuredCloseSelector = this.resolveSelector('sourceCloseButton')
+      const fallbackCloseSelectors = [
+        'side-bar-sources button[data-test-id="close-button"]',
+        'context-sidebar button[data-test-id="close-button"]',
+        'side-bar-sources button[aria-label="Close sidebar"]',
+        'context-sidebar button[aria-label="Close sidebar"]',
+        'context-sidebar button[aria-label*="close" i]',
+      ]
+
+      const closeSelectors = configuredCloseSelector
+        ? [configuredCloseSelector, ...fallbackCloseSelectors]
+        : fallbackCloseSelectors
+
+      let closeButton: HTMLElement | null = null
+      for (const selector of closeSelectors) {
+        closeButton = document.querySelector(selector) as HTMLElement | null
         if (closeButton) {
-          closeButton.click()
-          console.log('[GeminiParser] Closed sources panel')
+          break
         }
       }
+
+      if (closeButton) {
+        closeButton.click()
+        console.log('[GeminiParser] Closed sources panel')
+        return
+      }
+
+      // Fallback for UI variants where explicit close button selector changed.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      console.log('[GeminiParser] Attempted to close sources panel via Escape fallback')
+    }
+
+    // Close panel after successful extraction whenever panel is open.
+    if (hasUrlSourceFinal) {
+      closeSourcesPanelIfOpen()
+    }
+    if (currentResponseId && this.panelOpenedByParserForResponseId === currentResponseId) {
       this.panelOpenedByParserForResponseId = undefined
     }
 
