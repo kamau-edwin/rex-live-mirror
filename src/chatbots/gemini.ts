@@ -315,6 +315,9 @@ export class GeminiParser {
       sourceCloseButton: this.selectors.sourceCloseButton,
     })
 
+    const sources: ExtractedSource[] = []
+    const seen = new Set<string>()
+
     const normalizeSourceUrl = (rawUrl?: string | null): string | undefined => {
       if (!rawUrl) return undefined
 
@@ -663,7 +666,9 @@ export class GeminiParser {
         hasFooterSourceToggleInLatestTurn &&
         sourceDetailAnchors.length === 0
       ) {
-        this.clickedSourceButtonsByResponse.delete(currentResponseId)
+        if (currentResponseId) {
+          this.clickedSourceButtonsByResponse.delete(currentResponseId)
+        }
         console.log('[GeminiParser] Footer sources toggle produced no URL links - finalizing with empty sources')
         return []
       }
