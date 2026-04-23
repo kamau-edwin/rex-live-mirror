@@ -494,7 +494,6 @@ export class GeminiParser {
       latestTurnCitationButtons.length > 0 ||
       hasFooterSourceToggleInLatestTurn
     if (!hasSourceAffordanceInLatestTurn) {
-      closeSourcesPanel()
       console.log('[GeminiParser] Latest response has no source affordance; returning empty sources for this turn')
       return []
     }
