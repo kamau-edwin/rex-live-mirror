@@ -9,6 +9,12 @@ export interface ExtractedSource {
   source_url?: string
 }
 
+export interface ExtractedSourceGroup {
+  domain_title: string
+  domain_name: string
+  sources: ExtractedSource[]
+}
+
 export interface LLMInteraction {
   interaction_id: string  // Unique ID for this specific interaction
   updates_interaction_id?: string  // If this extends a previous capture, reference to original
@@ -19,7 +25,7 @@ export interface LLMInteraction {
   length: number
   url: string
   conversation_id?: string  // ChatGPT conversation ID (extracted from URL when available)
-  sources?: ExtractedSource[]  // Citation sources extracted from response
+  sources?: (ExtractedSource | ExtractedSourceGroup)[]  // Citation sources extracted from response
   panelCycleConfirmed?: boolean  // MutationObserver validation: did panel open→close?
   panelCycleTimestamp?: { opened: number; closed: number; duration: number }  // Timing proof
 }
@@ -259,6 +265,68 @@ class LLMChatbotBrowserModule extends REXClientModule {
     return `${type}:${normalized}`
   }
 
+  private hasUrlBackedSources(sources?: (ExtractedSource | ExtractedSourceGroup)[]): boolean {
+    if (!sources || sources.length === 0) return false
+    return sources.some((s) => {
+      if ('sources' in s) return (s as ExtractedSourceGroup).sources.some((e) => !!e.source_url)
+      return !!(s as ExtractedSource).source_url
+    })
+  }
+
+  private countSourceEntries(sources: (ExtractedSource | ExtractedSourceGroup)[]): number {
+    return sources.reduce((n, s) => {
+      if ('sources' in s) return n + (s as ExtractedSourceGroup).sources.length
+      return n + 1
+    }, 0)
+  }
+
+  private upgradeQueuedResponseSources(prefixKey: string, extractedSources: (ExtractedSource | ExtractedSourceGroup)[]): boolean {
+    if (extractedSources.length === 0) {
+      return false
+    }
+
+    const currentCapture = this.capturedPrefixes.get(prefixKey)
+    const pendingEntry = this.pendingSourcesExtraction.get(prefixKey)
+    const queuedInteractionId = currentCapture?.interaction_id || pendingEntry?.interaction.interaction_id
+
+    if (!queuedInteractionId) {
+      return false
+    }
+
+    const queuedInteraction = this.interactions.find((interaction) => interaction.interaction_id === queuedInteractionId)
+
+    if (!queuedInteraction && pendingEntry?.interaction.interaction_id !== queuedInteractionId) {
+      return false
+    }
+
+    const targetInteraction = queuedInteraction || pendingEntry?.interaction
+    if (!targetInteraction || targetInteraction.type !== 'response') {
+      return false
+    }
+
+    const currentSources = targetInteraction.sources || []
+    const currentHasUrls = this.hasUrlBackedSources(currentSources)
+    const nextHasUrls = this.hasUrlBackedSources(extractedSources)
+
+    const nextCount = this.countSourceEntries(extractedSources)
+    const currentCount = this.countSourceEntries(currentSources)
+
+    if (!nextHasUrls && nextCount <= currentCount) {
+      return false
+    }
+
+    if (currentHasUrls && !nextHasUrls) {
+      return false
+    }
+
+    if (currentHasUrls === nextHasUrls && nextCount <= currentCount) {
+      return false
+    }
+
+    targetInteraction.sources = extractedSources
+    return true
+  }
+
   /**
    * Generate a unique interaction ID
    */
@@ -465,7 +533,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
         }
 
         // Extract sources immediately if this is a response (don't wait until transmission)
-        let extractedSources: ExtractedSource[] = []
+        let extractedSources: (ExtractedSource | ExtractedSourceGroup)[] = []
         if (interaction.type === 'response' && typeof this.parser.extractSources === 'function') {
           try {
             // Check if sources button is available in DOM - button with class "legacy-sources-sidebar-button" 
@@ -495,6 +563,15 @@ class LLMChatbotBrowserModule extends REXClientModule {
         const existingCapture = this.capturedPrefixes.get(prefixKey)
 
         if (existingCapture) {
+          if (interaction.type === 'response' && extractedSources.length > 0) {
+            const upgraded = this.upgradeQueuedResponseSources(prefixKey, extractedSources)
+            if (upgraded) {
+              console.log(
+                `[LLM Chatbot Browser] Upgraded queued response sources to ${extractedSources.length} entries`,
+              )
+            }
+          }
+
           // Same prefix already captured
           if (currentLength <= existingCapture.length) {
             // Same or shorter content - skip (duplicate or subset)

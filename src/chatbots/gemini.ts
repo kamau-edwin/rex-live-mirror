@@ -48,6 +48,12 @@ export interface ExtractedSource {
   source_url?: string
 }
 
+export interface ExtractedSourceGroup {
+  domain_title: string
+  domain_name: string
+  sources: ExtractedSource[]
+}
+
 export class GeminiParser {
   name = 'gemini'
   selectors: GeminiSelectors
@@ -268,7 +274,7 @@ export class GeminiParser {
     return hasCopyAction && !isBusy
   }
 
-  extractSources(): ExtractedSource[] {
+  extractSources(): ExtractedSourceGroup[] {
     // Get all user interactions to extract latest question for response ID
     const interactions = this.extractInteractions()
     const latestQuestion = interactions
@@ -618,6 +624,48 @@ export class GeminiParser {
     const dedupedSources = [...urlBacked, ...keptOrphans]
     console.log(`[GeminiParser] After dedup: ${dedupedSources.length} sources`)
 
+    // ── Step 4: group into domain groups ────────────────────────────────────────
+    // Attempt to enrich each source with domain metadata from inline-source-card elements.
+    const cardEnrichment = new Map<string, { domain_title: string; domain_name: string }>()
+    const allCards = Array.from(document.querySelectorAll('inline-source-card'))
+    for (const card of allCards) {
+      const anchor = (card.closest('a[href]') || card.querySelector('a[href]')) as HTMLAnchorElement | null
+      if (!anchor) continue
+      const rawUrl = normalizeSourceUrl(anchor.getAttribute('href'))
+      if (!rawUrl) continue
+      const baseUrl = getBaseUrl(rawUrl)
+      if (!cardEnrichment.has(baseUrl)) {
+        const domainTitle = (card.querySelector('div.source-path.gds-title-s') as HTMLElement)?.innerText?.trim() || ''
+        const domainName = (card.querySelector('div.info.gds-body-s') as HTMLElement)?.innerText?.trim() || ''
+        cardEnrichment.set(baseUrl, { domain_title: domainTitle, domain_name: domainName })
+      }
+    }
+
+    const sourceGroupMap = new Map<string, ExtractedSourceGroup>()
+    for (const s of dedupedSources) {
+      const baseUrl = s.source_url ? getBaseUrl(s.source_url) : undefined
+      const enrichment = baseUrl ? cardEnrichment.get(baseUrl) : undefined
+      let domainTitle: string
+      let domainName: string
+      if (enrichment) {
+        domainTitle = enrichment.domain_title
+        domainName = enrichment.domain_name
+      } else if (s.source_url) {
+        try { domainName = new URL(s.source_url).hostname.replace(/^www\./, '') } catch { domainName = '' }
+        domainTitle = s.source_title
+      } else {
+        domainTitle = s.source_title
+        domainName = ''
+      }
+      const groupKey = domainName || domainTitle || s.source_title
+      if (!sourceGroupMap.has(groupKey)) {
+        sourceGroupMap.set(groupKey, { domain_title: domainTitle, domain_name: domainName, sources: [] })
+      }
+      sourceGroupMap.get(groupKey)!.sources.push({ source_title: s.source_title, source_url: s.source_url })
+    }
+    const sourceGroups = Array.from(sourceGroupMap.values())
+    console.log(`[GeminiParser] Grouped into ${sourceGroups.length} domain groups`)
+
     const hasUrlSourceFinal = dedupedSources.some((source) => !!source.source_url)
 
     const closeSourcesPanelIfOpen = (): void => {
@@ -721,6 +769,6 @@ export class GeminiParser {
       console.log('[GeminiParser] No URL-backed sources found yet - will retry on next mutation')
     }
 
-    return dedupedSources
+    return sourceGroups
   }
 }
