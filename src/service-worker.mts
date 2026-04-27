@@ -105,9 +105,14 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
 
   /**
    * Generate a hash for interaction deduplication
-   * Note: Does NOT include timestamp - same content within same conversation is a duplicate
+   * Prefer stable interaction_id when present so legitimate repeated prompts
+   * in the same conversation are not dropped as duplicates.
    */
   private hashInteraction(interaction: any): string {
+    if (interaction?.interaction_id) {
+      return `id:${interaction.interaction_id}`
+    }
+
     // Use type + conversation_id + first 200 chars of content as a unique identifier
     // Timestamp is deliberately excluded so near-simultaneous duplicates are caught
     const contentPrefix = (interaction.content || '').substring(0, 200)
@@ -117,17 +122,33 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
 
   /**
    * Build a stable fingerprint for completed Q&A payloads.
-   * Conversation IDs can transition from local-* to server IDs, so hash is content-centric.
+   * Prefer interaction IDs and parser timestamps so same/similar text is not
+   * over-collapsed across distinct turns.
    */
   private hashQaPair(question: any, response: any): string {
+    const source = String(response?.source || question?.source || '')
+    const questionInteractionId = String(question?.interaction_id || '')
+    const responseInteractionId = String(response?.interaction_id || '')
+
+    // Best case: both IDs exist and uniquely identify the turn pair.
+    if (questionInteractionId && responseInteractionId) {
+      return ['idpair', source, questionInteractionId, responseInteractionId].join('|')
+    }
+
     const normalize = (value: unknown): string =>
       String(value || '')
         .replace(/\s+/g, ' ')
         .trim()
         .substring(0, 500)
 
+    const questionTs = Number(question?.question_timestamp ?? question?.timestamp ?? 0)
+    const responseTs = Number(response?.response_timestamp ?? response?.timestamp ?? 0)
+
     return [
-      String(response?.source || question?.source || ''),
+      'tscontent',
+      source,
+      String(questionTs),
+      String(responseTs),
       normalize(question?.content),
       normalize(response?.content),
     ].join('|')
@@ -224,7 +245,7 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
             chatbot_name: interaction.source,
             interaction: {
               url: interaction.url || pendingQuestion.url,
-              question_timestamp: pendingQuestion.timestamp,
+              question_timestamp: pendingQuestion.question_timestamp || pendingQuestion.timestamp,
               response_timestamp: interaction.timestamp,
               question: {
                 content: pendingQuestion.content,

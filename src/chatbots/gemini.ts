@@ -6,6 +6,7 @@
 export interface ParsedInteraction {
   type: 'question' | 'response'
   content: string
+  question_timestamp?: number
 }
 
 export interface GeminiSelectors {
@@ -59,12 +60,17 @@ export class GeminiParser {
   selectors: GeminiSelectors
   private fallbackMode: GeminiFallbackMode
   private selectorFallbacks: GeminiSelectorFallbacks
-  private lastExtractedResponseId: string | undefined = undefined
+  private extractedResponseIds = new Set<string>()
+  private loggedCompletedSkipResponseIds = new Set<string>()
   private panelOpenedByParserForResponseId: string | undefined = undefined
-  private clickedSourceButtonsByResponse = new Map<string, Set<string>>()
   private selectorValidationError: string | null = null
-  private responseContainerTimestamps = new Map<Element, number>()
-  private lastResponseContainer: Element | undefined = undefined
+  private responseContainerIds = new Map<Element, string>()
+  private responseContainerSequence = 0
+  // Keyed by "normalizedContent:index" so that DOM remounts of the same question
+  // return the same timestamp, while a genuinely new identical question at a
+  // different position in the conversation gets a distinct timestamp.
+  private questionTimestampsByContentIndex = new Map<string, number>()
+  private lastAssignedQuestionTimestamp = 0
 
   constructor(config?: GeminiConfig) {
     // Config-only selectors: missing values are handled with warnings at call sites.
@@ -145,10 +151,185 @@ export class GeminiParser {
     return content.replace(/^\s*you\s+said\s*/i, '').replace(/\s+/g, ' ').trim()
   }
 
+  private normalizeText(content?: string | null): string {
+    return (content || '').replace(/\s+/g, ' ').trim()
+  }
+
+  private getResponseContainers(): Element[] {
+    const responseContainerSelector = this.resolveSelector('responseContainer')
+    if (!responseContainerSelector) {
+      console.warn('[GeminiParser] Missing config selector: responseContainer')
+      return []
+    }
+
+    return Array.from(document.querySelectorAll(responseContainerSelector))
+  }
+
+  private getUserQuestions(): string[] {
+    if (!this.selectors.userMessage) {
+      return []
+    }
+
+    return Array.from(document.querySelectorAll(this.selectors.userMessage))
+      .map((msg) => this.normalizeQuestion(this.normalizeText(msg.textContent)))
+      .filter(Boolean)
+  }
+
+  private getQuestionForResponseContainer(container: Element): string | undefined {
+    const responseContainers = this.getResponseContainers()
+    if (responseContainers.length === 0) {
+      return undefined
+    }
+
+    const responseIndex = responseContainers.findIndex((candidate) => candidate === container)
+    const questions = this.getUserQuestions()
+
+    if (responseIndex >= 0 && responseIndex < questions.length) {
+      return questions[responseIndex]
+    }
+
+    return questions.length > 0 ? questions[questions.length - 1] : undefined
+  }
+
+  private findResponseContainerForContent(responseContent?: string): Element | undefined {
+    const responseContainers = this.getResponseContainers()
+    if (responseContainers.length === 0) {
+      return undefined
+    }
+
+    const normalizedResponseContent = this.normalizeText(responseContent)
+    if (!normalizedResponseContent) {
+      return responseContainers[responseContainers.length - 1]
+    }
+
+    for (let i = responseContainers.length - 1; i >= 0; i--) {
+      const container = responseContainers[i]
+      const containerText = this.normalizeText(container.textContent)
+      if (!containerText) {
+        continue
+      }
+
+      if (containerText.includes(normalizedResponseContent)) {
+        return container
+      }
+    }
+
+    return responseContainers[responseContainers.length - 1]
+  }
+
+  /**
+   * Public method for browser.mts to resolve and store the specific container element
+   * at the time a response is enqueued, preventing stale content matching during promotion.
+   */
+  public resolveContainer(responseContent?: string): Element | undefined {
+    return this.findResponseContainerForContent(responseContent)
+  }
+
+  public isSourceExtractionComplete(responseContentOrContainer?: string | Element): boolean {
+    const responseContainer: Element | undefined = responseContentOrContainer instanceof Element
+      ? responseContentOrContainer
+      : this.findResponseContainerForContent(responseContentOrContainer)
+    if (!responseContainer) {
+      return false
+    }
+
+    const questionForTurn = this.getQuestionForResponseContainer(responseContainer)
+    const responseContainerId = this.getOrCreateResponseContainerId(responseContainer)
+    const currentResponseId = questionForTurn ? `${questionForTurn}:${responseContainerId}` : responseContainerId
+
+    return !!currentResponseId && this.extractedResponseIds.has(currentResponseId)
+  }
+
+  public abortSourceExtraction(responseContentOrContainer?: string | Element): void {
+    const responseContainer: Element | undefined = responseContentOrContainer instanceof Element
+      ? responseContentOrContainer
+      : this.findResponseContainerForContent(responseContentOrContainer)
+    if (!responseContainer) {
+      return
+    }
+
+    const questionForTurn = this.getQuestionForResponseContainer(responseContainer)
+    const responseContainerId = this.getOrCreateResponseContainerId(responseContainer)
+    const currentResponseId = questionForTurn ? `${questionForTurn}:${responseContainerId}` : responseContainerId
+    const panelOwnedByCurrentTurn =
+      !!currentResponseId && this.panelOpenedByParserForResponseId === currentResponseId
+
+    if (!panelOwnedByCurrentTurn) {
+      return
+    }
+
+    const panelOpen =
+      !!document.querySelector('context-sidebar:not([aria-hidden="true"])') ||
+      !!document.querySelector('side-bar-sources:not([aria-hidden="true"])')
+    if (panelOpen) {
+      const configuredCloseSelector = this.resolveSelector('sourceCloseButton')
+      const fallbackCloseSelectors = [
+        'side-bar-sources button[data-test-id="close-button"]',
+        'context-sidebar button[data-test-id="close-button"]',
+        'side-bar-sources button[aria-label="Close sidebar"]',
+        'context-sidebar button[aria-label="Close sidebar"]',
+        'context-sidebar button[aria-label*="close" i]',
+      ]
+
+      const closeSelectors = configuredCloseSelector
+        ? [configuredCloseSelector, ...fallbackCloseSelectors]
+        : fallbackCloseSelectors
+
+      let closeButton: HTMLElement | null = null
+      for (const selector of closeSelectors) {
+        closeButton = document.querySelector(selector) as HTMLElement | null
+        if (closeButton) {
+          break
+        }
+      }
+
+      if (closeButton) {
+        closeButton.click()
+      } else {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      }
+    }
+
+    this.panelOpenedByParserForResponseId = undefined
+    console.log('[GeminiParser] Aborted source extraction and cleared panel ownership for pending turn')
+  }
+
+  private getOrCreateResponseContainerId(container: Element): string {
+    let existingId = this.responseContainerIds.get(container)
+    if (existingId) {
+      return existingId
+    }
+
+    this.responseContainerSequence += 1
+    existingId = `turn-${this.responseContainerSequence}`
+    this.responseContainerIds.set(container, existingId)
+    return existingId
+  }
+
+  private getOrCreateQuestionTimestamp(content: string, index: number): number {
+    const key = `${content}:${index}`
+    const existing = this.questionTimestampsByContentIndex.get(key)
+    if (existing !== undefined) {
+      return existing
+    }
+
+    // Ensure timestamps are unique even when multiple questions are processed in the same millisecond.
+    const now = Date.now()
+    const timestamp = now > this.lastAssignedQuestionTimestamp ? now : this.lastAssignedQuestionTimestamp + 1
+    this.lastAssignedQuestionTimestamp = timestamp
+    this.questionTimestampsByContentIndex.set(key, timestamp)
+    return timestamp
+  }
+
   private isCitationSourceButton(button: Element): boolean {
     const aria = (button.getAttribute('aria-label') || '').toLowerCase()
     const dataTestId = (button.getAttribute('data-test-id') || '').toLowerCase()
     const className = (button.getAttribute('class') || '').toLowerCase()
+
+    // Ignore generic controls like footer "Sources" toggle buttons FIRST, before positive checks
+    if (aria === 'sources' || className.includes('legacy-sources-sidebar-button')) {
+      return false
+    }
 
     if (aria.includes('view source details')) {
       return true
@@ -158,19 +339,33 @@ export class GeminiParser {
       return true
     }
 
-    // Ignore generic controls like footer "Sources" toggle buttons.
-    if (aria === 'sources' || className.includes('legacy-sources-sidebar-button')) {
-      return false
+    return false
+  }
+
+  private normalizeSelectorUnion(selector?: string): string | undefined {
+    if (!selector) {
+      return undefined
     }
 
-    return false
+    const uniqueParts: string[] = []
+    const seen = new Set<string>()
+    for (const rawPart of selector.split(',')) {
+      const part = rawPart.trim()
+      if (!part || seen.has(part)) {
+        continue
+      }
+      seen.add(part)
+      uniqueParts.push(part)
+    }
+
+    return uniqueParts.length > 0 ? uniqueParts.join(', ') : undefined
   }
 
   /**
    * Resolve a selector using configured fallback behavior.
    */
   private resolveSelector<K extends keyof GeminiSelectors>(key: K): string | undefined {
-    const primary = this.selectors[key]?.trim()
+    const primary = this.normalizeSelectorUnion(this.selectors[key])
     const fallbacks = (this.selectorFallbacks[key] || []).map((s) => s.trim()).filter(Boolean)
 
     if (this.fallbackMode === 'none') {
@@ -178,8 +373,17 @@ export class GeminiParser {
     }
 
     if (this.fallbackMode === 'append') {
-      const parts = [primary, ...fallbacks].filter(Boolean) as string[]
-      return parts.length > 0 ? parts.join(', ') : undefined
+      const selectorGroups = Array.from(new Set([primary, ...fallbacks].filter(Boolean) as string[]))
+      const parts = selectorGroups.reduce<string[]>((acc, selector) => {
+        const normalized = selector
+          .split(',')
+          .map((part) => part.trim())
+          .filter(Boolean)
+        acc.push(...normalized)
+        return acc
+      }, [])
+      const uniqueParts = Array.from(new Set(parts))
+      return uniqueParts.length > 0 ? uniqueParts.join(', ') : undefined
     }
 
     // replace mode: choose first selector that currently matches DOM
@@ -209,13 +413,17 @@ export class GeminiParser {
     if (this.selectors.userMessage) {
       const userMessages = document.querySelectorAll(this.selectors.userMessage)
       console.log(`[GeminiParser] Found ${userMessages.length} user message elements`)
-      userMessages.forEach((msg) => {
+      userMessages.forEach((msg, index) => {
         const rawContent = msg.textContent?.trim()
         const content = rawContent ? this.normalizeQuestion(rawContent) : undefined
         if (content) {
           interactions.push({
             type: 'question',
             content,
+            // Keyed by (content, position) so remounted DOM nodes return the
+            // same stable timestamp, while identical questions at different
+            // conversation positions get distinct timestamps.
+            question_timestamp: this.getOrCreateQuestionTimestamp(content, index),
           })
         }
       })
@@ -239,19 +447,12 @@ export class GeminiParser {
     return interactions
   }
 
-  isResponseComplete(): boolean {
-    const responseContainerSelector = this.resolveSelector('responseContainer')
-    if (!responseContainerSelector) {
-      console.warn('[GeminiParser] Missing config selector: responseContainer')
+  isResponseComplete(responseContent?: string): boolean {
+    const responseContainer = this.findResponseContainerForContent(responseContent)
+    if (!responseContainer) {
       return false
     }
 
-    const responseContainers = document.querySelectorAll(responseContainerSelector)
-    if (responseContainers.length === 0) {
-      return false
-    }
-
-    const latest = responseContainers[responseContainers.length - 1]
     const completeFooterSelector = this.resolveSelector('completeFooter')
     const copyActionSelector = this.resolveSelector('copyAction')
     const busyIndicatorSelector = this.resolveSelector('busyIndicator')
@@ -263,9 +464,9 @@ export class GeminiParser {
       return false
     }
 
-    const hasCompleteFooter = latest.querySelector(completeFooterSelector) !== null
-    const hasCopyAction = latest.querySelector(copyActionSelector) !== null
-    const isBusy = latest.querySelector(busyIndicatorSelector) !== null
+    const hasCompleteFooter = responseContainer.querySelector(completeFooterSelector) !== null
+    const hasCopyAction = responseContainer.querySelector(copyActionSelector) !== null
+    const isBusy = responseContainer.querySelector(busyIndicatorSelector) !== null
 
     if (hasCompleteFooter) {
       return true
@@ -274,51 +475,35 @@ export class GeminiParser {
     return hasCopyAction && !isBusy
   }
 
-  extractSources(): ExtractedSourceGroup[] {
-    // Get all user interactions to extract latest question for response ID
-    const interactions = this.extractInteractions()
-    const latestQuestion = interactions
-      .reverse()
-      .find((i) => i.type === 'question')?.content
-
-    // Get latest response container for querying source elements
-    const responseContainerSelector = this.resolveSelector('responseContainer')
-    if (!responseContainerSelector) {
-      console.warn('[GeminiParser] Missing config selector: responseContainer')
-      return []
-    }
-
-    const responseContainers = document.querySelectorAll(responseContainerSelector)
-    const latestResponseContainer =
-      responseContainers.length > 0 ? (responseContainers[responseContainers.length - 1] as Element) : undefined
-
-    if (!latestResponseContainer) {
+  extractSources(responseContentOrContainer?: string | Element): ExtractedSourceGroup[] {
+    const responseContainer: Element | undefined = responseContentOrContainer instanceof Element
+      ? responseContentOrContainer
+      : this.findResponseContainerForContent(responseContentOrContainer)
+    if (!responseContainer) {
       console.warn('[GeminiParser] No response containers found')
       return []
     }
 
-    // Assign timestamp to new response containers (one timestamp per question instance)
-    if (!this.responseContainerTimestamps.has(latestResponseContainer)) {
-      this.responseContainerTimestamps.set(latestResponseContainer, Date.now())
-    }
-
-    const containerTimestamp = this.responseContainerTimestamps.get(latestResponseContainer)!
-    const currentResponseId = latestQuestion ? `${latestQuestion}:${containerTimestamp}` : undefined
+    const questionForTurn = this.getQuestionForResponseContainer(responseContainer)
+    const responseContainerId = this.getOrCreateResponseContainerId(responseContainer)
+    const currentResponseId = questionForTurn ? `${questionForTurn}:${responseContainerId}` : responseContainerId
 
     // Skip if we've already extracted sources for this response
-    if (currentResponseId === this.lastExtractedResponseId) {
-      console.log('[GeminiParser] Skipping source extraction - already completed for this response')
+    if (currentResponseId && this.extractedResponseIds.has(currentResponseId)) {
+      if (!this.loggedCompletedSkipResponseIds.has(currentResponseId)) {
+        this.loggedCompletedSkipResponseIds.add(currentResponseId)
+        console.log('[GeminiParser] Skipping source extraction - already completed for this response')
+      }
       return []
     }
 
-    // Use latest response container to scope all DOM queries to this question's context
-    this.lastResponseContainer = latestResponseContainer
+    // Scope response selectors to this response container to avoid cross-turn bleed.
     console.log('[GeminiParser] Config selectors:', {
-      sourceAnchors: this.selectors.sourceAnchors,
-      sourceButtons: this.selectors.sourceButtons,
-      sourceDetailAnchors: this.selectors.sourceDetailAnchors,
-      sourceToggleButton: this.selectors.sourceToggleButton,
-      sourceCloseButton: this.selectors.sourceCloseButton,
+      sourceAnchors: this.resolveSelector('sourceAnchors'),
+      sourceButtons: this.resolveSelector('sourceButtons'),
+      sourceDetailAnchors: this.resolveSelector('sourceDetailAnchors'),
+      sourceToggleButton: this.resolveSelector('sourceToggleButton'),
+      sourceCloseButton: this.resolveSelector('sourceCloseButton'),
     })
 
     const sources: ExtractedSource[] = []
@@ -430,40 +615,47 @@ export class GeminiParser {
         console.warn('[GeminiParser] Missing config selector: sourceToggleButton')
         return false
       }
-      const toggle = document.querySelector(toggleSelector) as HTMLElement | null
+      // Only search within the current response container: a document-level
+      // fallback would pick up toggles from other turns and cause panel bleed.
+      const toggle = responseContainer.querySelector(toggleSelector) as HTMLElement | null
       if (!toggle) {
-        console.warn(`[GeminiParser] Toggle button not found with selector: ${toggleSelector}`)
+        console.warn(`[GeminiParser] Toggle button not found in response container: ${toggleSelector}`)
         return false
       }
 
       const className = toggle.getAttribute('class') || ''
       const alreadySelected = /\bselected\b/i.test(className)
       const ariaExpanded = (toggle.getAttribute('aria-expanded') || '').toLowerCase() === 'true'
+
+      const panelOwnedByCurrentTurn =
+        !!currentResponseId && this.panelOpenedByParserForResponseId === currentResponseId
+
       if (alreadySelected || ariaExpanded) {
-        console.log('[GeminiParser] Sources panel already open, skipping toggle click')
+        if (panelOwnedByCurrentTurn) {
+          console.log('[GeminiParser] Sources panel already open for this response, skipping toggle click')
+          return false
+        }
+
+        // Panel is open for another turn or from stale state. Close it with a
+        // single click and clear ownership. Do NOT attempt to re-open here:
+        // a double-click risks landing in an ambiguous UI state (still-open wrong
+        // turn, or briefly closed/reopened out of order). The mutation triggered
+        // by the close will fire promoteReadyResponses again; on that next pass
+        // the panel will be confirmed closed and we can open it cleanly.
+        toggle.click()
+        this.panelOpenedByParserForResponseId = undefined
+        console.log('[GeminiParser] Sources panel was open for another turn; closed. Will reopen on next extraction pass.')
         return false
       }
 
-      // Immediate click - open sources panel for rapid extraction (sub-500ms total visible)
+      // Open panel immediately so source detail anchors can be read for this turn.
       toggle.click()
       console.log('[GeminiParser] Clicked sources toggle to reveal source URLs')
       return true
     }
 
-    const removeSourcesPanelCss = (): void => {
-      const styleId = 'gemini-sources-hidden'
-      const style = document.getElementById(styleId)
-      if (style) {
-        style.remove()
-        console.log('[GeminiParser] Removed CSS hide - sources panel can now be closed naturally')
-      }
-    }
-
     const queryWithinLatestTurn = (selector: string): Element[] => {
-      if (!latestResponseContainer) {
-        return []
-      }
-      return Array.from(latestResponseContainer.querySelectorAll(selector))
+      return Array.from(responseContainer.querySelectorAll(selector))
     }
 
     // Prefer explicit source links when present (scoped to latest response turn).
@@ -487,12 +679,15 @@ export class GeminiParser {
       console.warn('[GeminiParser] Missing config selector: sourceAnchors')
     }
 
-    // Source chips/buttons are also scoped to latest response turn.
+    // Source chips/buttons are scoped to the latest response turn and only indicate
+    // that citations exist for this response. They do not carry the source payload.
     const sourceButtonSelector = this.resolveSelector('sourceButtons')
     const latestTurnSourceButtons = sourceButtonSelector ? queryWithinLatestTurn(sourceButtonSelector) : []
     const latestTurnCitationButtons = latestTurnSourceButtons.filter((button) => this.isCitationSourceButton(button))
 
-    // Some Gemini turns expose sources only behind a footer Sources toggle button.
+    // Some turns require opening the footer Sources toggle to expose source details.
+    // Inline citation affordances (icon-only or +N variants) tell us citations exist,
+    // but the actual source metadata is revealed only after the sources panel is opened.
     const sourceToggleSelector = this.resolveSelector('sourceToggleButton')
     const hasFooterSourceToggleInLatestTurn = sourceToggleSelector
       ? queryWithinLatestTurn(sourceToggleSelector).length > 0
@@ -504,6 +699,7 @@ export class GeminiParser {
       latestTurnCitationButtons.length > 0 ||
       hasFooterSourceToggleInLatestTurn
     if (!hasSourceAffordanceInLatestTurn) {
+      if (currentResponseId) { this.extractedResponseIds.add(currentResponseId) }
       console.log('[GeminiParser] Latest response has no source affordance; returning empty sources for this turn')
       return []
     }
@@ -511,8 +707,13 @@ export class GeminiParser {
     // Additional source detail links are often rendered in side panels.
     const sourceDetailAnchorSelector = this.resolveSelector('sourceDetailAnchors')
     let sourceDetailAnchors: Element[] = []
+    const panelOwnedByCurrentTurn =
+      !!currentResponseId && this.panelOpenedByParserForResponseId === currentResponseId
+    
     if (sourceDetailAnchorSelector) {
-      sourceDetailAnchors = Array.from(document.querySelectorAll(sourceDetailAnchorSelector))
+      // Never trust a pre-existing global side panel unless it is known to belong
+      // to this response turn, otherwise stale sources can bleed across turns.
+      sourceDetailAnchors = panelOwnedByCurrentTurn ? Array.from(document.querySelectorAll(sourceDetailAnchorSelector)) : []
       console.log(
         `[GeminiParser] Found ${sourceDetailAnchors.length} source detail anchors with selector: ${sourceDetailAnchorSelector}`,
       )
@@ -522,17 +723,19 @@ export class GeminiParser {
 
     let openedByParser = false
     if (sourceDetailAnchors.length === 0) {
-      // Open panel only if source button exists
+      // Attempt to open the sources panel for this turn when detail anchors are not yet visible.
       console.log('[GeminiParser] No detail anchors found, checking for source button')
       openedByParser = maybeOpenSourcesPanel()
       
       if (openedByParser && currentResponseId) {
         this.panelOpenedByParserForResponseId = currentResponseId
-        
-        // Extract immediately - no waiting
-        if (sourceDetailAnchorSelector) {
-          sourceDetailAnchors = Array.from(document.querySelectorAll(sourceDetailAnchorSelector))
-          console.log(`[GeminiParser] Extracted ${sourceDetailAnchors.length} detail anchors`)
+        // Panel now open for this turn - anchors will be visible in DOM after Gemini re-renders
+        const sourceDetailAnchors_Retry = sourceDetailAnchorSelector ? Array.from(document.querySelectorAll(sourceDetailAnchorSelector)) : []
+        if (sourceDetailAnchors_Retry.length > 0) {
+          sourceDetailAnchors = sourceDetailAnchors_Retry
+          console.log(`[GeminiParser] Extracted ${sourceDetailAnchors.length} detail anchors after panel open`)
+        } else {
+          console.log('[GeminiParser] Panel opened but no anchors found yet - will retry on next mutation')
         }
       }
     }
@@ -542,24 +745,23 @@ export class GeminiParser {
         return
       }
 
+      const sourceCard = anchor.closest('inline-source-card') as HTMLElement | null
+      const cardTitle = sourceCard?.querySelector('div.title.gds-title-m')?.textContent?.replace(/\s+/g, ' ').trim()
+      const cardPath = sourceCard?.querySelector('div.source-path.gds-title-s')?.textContent?.replace(/\s+/g, ' ').trim()
+
       const title =
+        cardTitle ||
+        cardPath ||
         anchor.textContent?.replace(/\s+/g, ' ').trim() ||
         anchor.getAttribute('aria-label') ||
         undefined
       addSource(title, url)
     })
 
-    // Fallback: capture source chip labels even when URL is not directly exposed.
-    // NOTE: Exclude the toggle button (.legacy-sources-sidebar-button) — it's a control, not a source
-    if (sourceButtonSelector) {
-      latestTurnSourceButtons.forEach((button, index) => {
-        const text = button.textContent?.replace(/\s+/g, ' ').trim() || ''
-        const aria = button.getAttribute('aria-label')?.trim() || ''
-        const label = text || aria || `source-${index + 1}`
-        const url = extractUrlFromElement(button)
-        addSource(label, url)
-      })
-    } else {
+    // Citation buttons are affordance-only and are intentionally not converted into
+    // sources. Actual source metadata must come from explicit inline anchors or the
+    // sources panel detail anchors revealed by the toggle.
+    if (!sourceButtonSelector) {
       console.warn('[GeminiParser] Missing config selector: sourceButtons')
     }
 
@@ -708,25 +910,48 @@ export class GeminiParser {
       console.log('[GeminiParser] Attempted to close sources panel via Escape fallback')
     }
 
-    // Close panel after successful extraction whenever panel is open.
-    if (hasUrlSourceFinal) {
-      closeSourcesPanelIfOpen()
-    }
-    if (currentResponseId && this.panelOpenedByParserForResponseId === currentResponseId) {
+    const panelOwnedAtClose =
+      !!currentResponseId && this.panelOpenedByParserForResponseId === currentResponseId
+
+    const clearPanelOwnership = (): void => {
+      if (!panelOwnedAtClose) {
+        return
+      }
       this.panelOpenedByParserForResponseId = undefined
+      console.log('[GeminiParser] Cleared panel ownership - next turn will open fresh panel')
+    }
+
+    const finalizeEmptySources = (reason: string): ExtractedSourceGroup[] => {
+      // Finalized turn: if parser owns the panel for this turn, close it before exiting.
+      if (panelOwnedAtClose) {
+        closeSourcesPanelIfOpen()
+      }
+      clearPanelOwnership()
+      if (currentResponseId) { this.extractedResponseIds.add(currentResponseId) }
+      if (currentResponseId) { this.loggedCompletedSkipResponseIds.delete(currentResponseId) }
+      console.log(reason)
+      return []
     }
 
     // Only mark response as complete once we have at least one URL-backed source.
     if (hasUrlSourceFinal) {
-      this.lastExtractedResponseId = currentResponseId
-      if (currentResponseId) {
-        this.clickedSourceButtonsByResponse.delete(currentResponseId)
+      // URL-backed extraction complete for this turn: close owned panel and clear ownership.
+      if (panelOwnedAtClose) {
+        closeSourcesPanelIfOpen()
       }
+      clearPanelOwnership()
+      if (currentResponseId) { this.extractedResponseIds.add(currentResponseId) }
+      if (currentResponseId) { this.loggedCompletedSkipResponseIds.delete(currentResponseId) }
       console.log(`[GeminiParser] Response extraction complete (found ${dedupedSources.length} sources)`)
     } else {
-      const clickedForResponse = currentResponseId ? this.clickedSourceButtonsByResponse.get(currentResponseId) : undefined
-      const clickedCount = clickedForResponse?.size || 0
       const citationCandidateCount = latestTurnCitationButtons.length
+
+      // If this call opened the panel but anchors are not in DOM yet, wait for next mutation.
+      // This avoids finalizing empty before Gemini hydrates side-panel links.
+      if (openedByParser && sourceDetailAnchors.length === 0) {
+        console.log('[GeminiParser] Panel opened for current turn; waiting for panel links on next mutation')
+        return []
+      }
 
       // Some Gemini responses legitimately have no sources. Finalize those turns with empty sources.
       if (
@@ -735,38 +960,21 @@ export class GeminiParser {
         latestTurnSourceAnchors.length === 0 &&
         !hasFooterSourceToggleInLatestTurn
       ) {
-        this.lastExtractedResponseId = currentResponseId
-        if (currentResponseId) {
-          this.clickedSourceButtonsByResponse.delete(currentResponseId)
-        }
-        console.log('[GeminiParser] No source citations detected for this turn - finalizing with empty sources')
-        return []
+        return finalizeEmptySources('[GeminiParser] No source citations detected for this turn - finalizing with empty sources')
       }
 
-      // Footer-only source turns: after one panel-open attempt for this turn, stop retrying forever.
+      // If citation affordances or a sources toggle exist for this turn, do not finalize
+      // with an empty payload. Keep waiting until real source detail data is extracted.
       if (
-        citationCandidateCount === 0 &&
-        hasFooterSourceToggleInLatestTurn &&
+        (citationCandidateCount > 0 || hasFooterSourceToggleInLatestTurn) &&
         sourceDetailAnchors.length === 0
       ) {
-        if (currentResponseId) {
-          this.clickedSourceButtonsByResponse.delete(currentResponseId)
-        }
-        console.log('[GeminiParser] Footer sources toggle produced no URL links - finalizing with empty sources')
-        return []
-      }
-
-      // If all citation chips have already been tried and no URL links emerged, stop retrying forever.
-      if (citationCandidateCount > 0 && clickedCount >= citationCandidateCount && sourceDetailAnchors.length === 0) {
-        this.lastExtractedResponseId = currentResponseId
-        if (currentResponseId) {
-          this.clickedSourceButtonsByResponse.delete(currentResponseId)
-        }
-        console.log('[GeminiParser] Citation chips exhausted without URL links - finalizing with empty sources')
+        console.log('[GeminiParser] Citation affordance present but no source detail links captured yet - waiting for next mutation')
         return []
       }
 
       console.log('[GeminiParser] No URL-backed sources found yet - will retry on next mutation')
+      return []
     }
 
     return sourceGroups
