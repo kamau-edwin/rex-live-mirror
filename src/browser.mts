@@ -1,6 +1,6 @@
 import { REXClientModule, registerREXModule } from '@bric/rex-core/browser'
-import { PerplexityParser } from './chatbots/perplexity.js'
-import { ChatGPTParser } from './chatbots/chatgpt.js'
+import { PerplexityParser, type SourceExtractionResult } from './chatbots/perplexity.js'
+import { ChatGPTParser, type ChatGPTCompletionDecision } from './chatbots/chatgpt.js'
 import { GeminiParser } from './chatbots/gemini.js'
 import { ClaudeParser } from './chatbots/claude.js'
 
@@ -28,6 +28,7 @@ export interface LLMInteraction {
   conversation_id?: string  // ChatGPT conversation ID (extracted from URL when available)
   turn_number?: number  // 1-based ordinal for this interaction type in the current parsed snapshot
   sources?: (ExtractedSource | ExtractedSourceGroup)[]  // Citation sources extracted from response
+  source_extraction?: 'success' | 'failed' | 'none' | 'terminal_empty' | 'data_capture_error' | 'panel_opening_failure'
   panelCycleConfirmed?: boolean  // MutationObserver validation: did panel open→close?
   panelCycleTimestamp?: { opened: number; closed: number; duration: number }  // Timing proof
 }
@@ -58,11 +59,12 @@ class LLMChatbotBrowserModule extends REXClientModule {
   // Track responses pending source extraction: key = prefixKey, value = { interaction, containerRef, turnRetryObserver }
   // containerRef pins extraction to the original turn element, avoiding stale content matching during later promotions.
   private pendingSourcesExtraction: Map<string, PendingSourceExtractionInfo> = new Map()
+  private sourceRetryExhaustedKeys: Set<string> = new Set()
   // Track captured content by prefix for update detection
   // Key: type + first N chars (normalized), Value: { interaction_id, length }
   private capturedPrefixes: Map<string, CapturedInteractionInfo> = new Map()
   private readonly PREFIX_LENGTH = 100  // Characters to use for prefix matching
-  private readonly MAX_PENDING_SOURCE_RETRIES = 20
+  private readonly MAX_PENDING_SOURCE_RETRIES = 8
   private batchSize: number = 10
   private transmissionInterval: number = 60000
   private processDebounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -71,9 +73,17 @@ class LLMChatbotBrowserModule extends REXClientModule {
   private lastCheckedUrl: string = ''  // Track URL to detect changes
   private localSessionId: string | undefined = undefined  // Self-generated ID for logged-out sessions
   private hadMessagesInDOM: boolean = false  // Track if we previously had messages (for new conversation detection)
+  private emptyDomSinceMs: number | null = null
+  private readonly EMPTY_DOM_RESET_GRACE_MS = 2000
   private lastSelectorDiagnosticFingerprint: string = ''
   private responseContainerKeys = new Map<Element, string>()
   private responseContainerKeySequence = 0
+  private completionRecheckTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
+  private completionRecheckAttempts: Map<string, number> = new Map()
+  private readonly MAX_COMPLETION_RECHECK_ATTEMPTS = 3
+  private readonly COMPLETION_RECHECK_DELAY_MS = 300
+  private processInFlight: boolean = false
+  private processQueued: boolean = false
 
   // Browser-side persistence checkpoint — prevents re-capture of already-sent prompts across page reloads.
   private captureCheckpointMaxQts: number = 0                  // max question_timestamp seen
@@ -248,11 +258,9 @@ class LLMChatbotBrowserModule extends REXClientModule {
           clearTimeout(this.processDebounceTimer)
         }
         this.processDebounceTimer = setTimeout(() => {
-          try {
-            this.processPage()
-          } catch (error) {
+          void this.processPage().catch((error) => {
             console.error('[LLM Chatbot Browser] Error in mutation observer callback:', error)
-          }
+          })
         }, this.DEBOUNCE_MS)
       })
 
@@ -266,9 +274,13 @@ class LLMChatbotBrowserModule extends REXClientModule {
       console.log('[LLM Chatbot Browser] DOM mutation observer started with debouncing')
 
       // Initial page processing (with small delay to let page settle)
-      setTimeout(() => this.processPage(), 1000)
+      setTimeout(() => {
+        void this.processPage().catch((error) => {
+          console.error('[LLM Chatbot Browser] Error in initial page processing:', error)
+        })
+      }, 1000)
 
-      console.log('[LLM Chatbot Browser] Event-driven transmission started (mutation-driven promotions, no timer fallback)')
+      console.log('[LLM Chatbot Browser] Event-driven transmission started (mutation-driven promotions with bounded completion self-rechecks)')
     } catch (error) {
       console.error('[LLM Chatbot Browser] Error starting capture:', error)
     }
@@ -299,6 +311,66 @@ class LLMChatbotBrowserModule extends REXClientModule {
     }
 
     return `${type}:${normalized}`
+  }
+
+  /**
+   * Stable per-response guard key that survives container remounts.
+   * This prevents a capped pending response from being re-enqueued forever
+   * when React replaces DOM nodes and container-scoped prefix keys change.
+   */
+  private getResponseRetryGuardKey(content: string): string {
+    const normalized = content.trim().substring(0, this.PREFIX_LENGTH).replace(/\s+/g, ' ')
+    return `response:${normalized}`
+  }
+
+  private getCompletionRecheckKey(source: string, turnNumber: number): string {
+    return `${source}:response-turn:${turnNumber}`
+  }
+
+  private clearCompletionRecheck(key: string): void {
+    const timer = this.completionRecheckTimers.get(key)
+    if (timer) {
+      clearTimeout(timer)
+      this.completionRecheckTimers.delete(key)
+    }
+    this.completionRecheckAttempts.delete(key)
+  }
+
+  private clearAllCompletionRechecks(): void {
+    for (const timer of this.completionRecheckTimers.values()) {
+      clearTimeout(timer)
+    }
+    this.completionRecheckTimers.clear()
+    this.completionRecheckAttempts.clear()
+  }
+
+  private scheduleCompletionRecheck(
+    key: string,
+    reason: string,
+    delayMs: number = this.COMPLETION_RECHECK_DELAY_MS,
+  ): void {
+    if (this.completionRecheckTimers.has(key)) {
+      return
+    }
+
+    const attempts = this.completionRecheckAttempts.get(key) || 0
+    if (attempts >= this.MAX_COMPLETION_RECHECK_ATTEMPTS) {
+      return
+    }
+
+    const nextAttempt = attempts + 1
+    const timer = setTimeout(() => {
+      this.completionRecheckTimers.delete(key)
+      this.completionRecheckAttempts.set(key, nextAttempt)
+      console.log(
+        `[LLM Chatbot Browser] Completion recheck attempt ${nextAttempt}/${this.MAX_COMPLETION_RECHECK_ATTEMPTS} (${reason})`,
+      )
+      void this.processPage().catch((error) => {
+        console.error('[LLM Chatbot Browser] Error in completion recheck pass:', error)
+      })
+    }, Math.max(0, delayMs))
+
+    this.completionRecheckTimers.set(key, timer)
   }
 
   private hasUrlBackedSources(sources?: (ExtractedSource | ExtractedSourceGroup)[]): boolean {
@@ -376,7 +448,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
       const latestPendingEntry = this.pendingSourcesExtraction.get(prefixKey)
       this.disconnectTurnRetryObserver(latestPendingEntry)
       console.log('[LLM Chatbot Browser] Turn-scoped source retry triggered for pending response')
-      this.promoteReadyResponses()
+      this.promoteReadyResponses('turn-retry')
     })
 
     pendingEntry.turnRetryObserver = observer
@@ -494,6 +566,11 @@ class LLMChatbotBrowserModule extends REXClientModule {
       const pathMatch = url.match(/perplexity\.ai\/search\/([^?#]+)/)
       if (pathMatch) {
         const searchPath = pathMatch[1]
+        // Newer URLs can be /search/{uuid} or /search/new/{uuid}
+        const uuidMatch = searchPath.match(/(?:^|\/)([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i)
+        if (uuidMatch) {
+          return uuidMatch[1]
+        }
         // Extract the ID after the last hyphen (base64url format: letters, numbers, _, . - no hyphens)
         const idMatch = searchPath.match(/-([a-zA-Z0-9_.]{15,30})$/)
         if (idMatch) {
@@ -554,6 +631,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
     // If server conversation ID appeared, it supersedes any local session ID
     if (newServerConversationId && newServerConversationId !== this.currentConversationId) {
       console.log(`[LLM Chatbot Browser] Server conversation ID detected: ${newServerConversationId}`)
+      this.clearAllCompletionRechecks()
       
       // Clear local session ID since server ID takes precedence
       if (this.localSessionId) {
@@ -650,13 +728,96 @@ class LLMChatbotBrowserModule extends REXClientModule {
     console.log(`[LLM Chatbot Browser] Checkpoint persisted: ${bounded.length} prefixes`)
   }
 
-  private processPage(): void {
+  private isPerplexityTerminalSourceResult(result: unknown): result is SourceExtractionResult {
+    return !!result &&
+      typeof result === 'object' &&
+      Array.isArray((result as SourceExtractionResult).sources) &&
+      typeof (result as SourceExtractionResult).source_extraction === 'string'
+  }
+
+  private createPerplexityPanelLifecycleObserver(
+    sourceCloseSelector: string | undefined,
+    panelContainerSelector: string,
+    sourceDetailSelector: string | undefined,
+  ): { stop: (label: string) => void } {
+    if (!sourceCloseSelector) {
+      return {
+        stop: () => undefined,
+      }
+    }
+
+    const startedAt = Date.now()
+    let openTransitions = 0
+    let closeTransitions = 0
+    let lastCloseButtonsVisible = document.querySelectorAll(sourceCloseSelector).length > 0
+
+    const observer = new MutationObserver(() => {
+      const closeButtonsVisibleNow = document.querySelectorAll(sourceCloseSelector).length > 0
+      if (closeButtonsVisibleNow === lastCloseButtonsVisible) {
+        return
+      }
+
+      if (closeButtonsVisibleNow) {
+        openTransitions += 1
+      } else {
+        closeTransitions += 1
+      }
+
+      console.log(
+        `[LLM Chatbot Browser] Perplexity panel MO transition: ` +
+        `${lastCloseButtonsVisible ? 'open->closed' : 'closed->open'} ` +
+        `(open_transitions=${openTransitions}, close_transitions=${closeTransitions})`,
+      )
+
+      lastCloseButtonsVisible = closeButtonsVisibleNow
+    })
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+    })
+
+    return {
+      stop: (label: string) => {
+        observer.disconnect()
+        const elapsedMs = Date.now() - startedAt
+        const closeButtonsVisible = document.querySelectorAll(sourceCloseSelector).length
+        const openPanelCandidates = document.querySelectorAll(panelContainerSelector).length
+        const detailAnchorsVisible = sourceDetailSelector
+          ? document.querySelectorAll(sourceDetailSelector).length
+          : 0
+
+        console.log(
+          `[LLM Chatbot Browser] Perplexity panel MO summary (${label}): ` +
+          `open_transitions=${openTransitions} ` +
+          `close_transitions=${closeTransitions} ` +
+          `elapsed_ms=${elapsedMs} ` +
+          `close_buttons=${closeButtonsVisible} ` +
+          `open_panels=${openPanelCandidates} ` +
+          `detail_anchors=${detailAnchorsVisible}`,
+        )
+      },
+    }
+  }
+
+  private async processPage(): Promise<void> {
+    if (this.processInFlight) {
+      this.processQueued = true
+      return
+    }
+
+    this.processInFlight = true
+
     if (!this.captureCheckpointLoaded) {
       console.debug('[LLM Chatbot Browser] Checkpoint not yet loaded, deferring page processing')
+      this.processInFlight = false
       return
     }
     if (!this.parser) {
       console.debug('[LLM Chatbot Browser] No parser available, skipping page processing')
+      this.processInFlight = false
       return
     }
 
@@ -670,15 +831,30 @@ class LLMChatbotBrowserModule extends REXClientModule {
 
       // Detect new conversation: messages were cleared from DOM
       if (this.hadMessagesInDOM && !hasMessagesNow) {
-        console.log('[LLM Chatbot Browser] Messages cleared from DOM - new conversation detected')
-        // Reset for new conversation
+        if (this.emptyDomSinceMs === null) {
+          this.emptyDomSinceMs = Date.now()
+          console.log('[LLM Chatbot Browser] DOM empty snapshot detected; waiting before conversation reset')
+        }
+
+        const emptyDurationMs = Date.now() - this.emptyDomSinceMs
+        if (emptyDurationMs < this.EMPTY_DOM_RESET_GRACE_MS) {
+          // SPA remounts can briefly drop all nodes; avoid clearing dedupe/checkpoint state too early.
+          return
+        }
+
+        console.log('[LLM Chatbot Browser] Messages absent beyond grace period - new conversation detected')
+        // Reset for confirmed new conversation
         this.localSessionId = undefined
         this.capturedPrefixes.clear()
+        this.clearAllCompletionRechecks()
         this.captureCheckpointMaxQts = 0
         this.captureCheckpointLoaded = true
         window.sessionStorage.removeItem(this.buildCheckpointStorageKey())
         this.currentConversationId = undefined
         this.lastCheckedUrl = ''  // Force URL re-check
+        this.emptyDomSinceMs = null
+      } else if (hasMessagesNow) {
+        this.emptyDomSinceMs = null
       }
       
       // Update tracking state
@@ -719,61 +895,61 @@ class LLMChatbotBrowserModule extends REXClientModule {
         const nextTurnNumber = (interactionOrdinalByType.get(interaction.type) || 0) + 1
         interactionOrdinalByType.set(interaction.type, nextTurnNumber)
 
-        // For parsers that support completion checks (Gemini), avoid partial response capture.
+        const responseContainerRef: Element | undefined =
+          interaction.type === 'response' && typeof this.parser.resolveContainer === 'function'
+            ? this.parser.resolveContainer(interaction.content)
+            : undefined
+
+        // Parser-owned completion decisions gate response capture.
         if (
+          interaction.type === 'response' &&
+          this.parser?.name === 'chatgpt' &&
+          typeof this.parser.getCompletionDecision === 'function'
+        ) {
+          const completionDecision = this.parser.getCompletionDecision(interaction.content) as ChatGPTCompletionDecision
+          const completionRecheckKey = this.getCompletionRecheckKey(this.parser.name, nextTurnNumber)
+          const completionAttempts = this.completionRecheckAttempts.get(completionRecheckKey) || 0
+          const canForcePromotionAfterRetries = completionDecision.reason === 'stability_pending'
+
+          if (!completionDecision.completed) {
+            if (
+              completionDecision.shouldRecheck &&
+              canForcePromotionAfterRetries &&
+              completionAttempts < this.MAX_COMPLETION_RECHECK_ATTEMPTS
+            ) {
+              this.scheduleCompletionRecheck(
+                completionRecheckKey,
+                completionDecision.reason,
+                completionDecision.recheckDelayMs ?? this.COMPLETION_RECHECK_DELAY_MS,
+              )
+              continue
+            }
+
+            if (
+              completionDecision.shouldRecheck &&
+              canForcePromotionAfterRetries &&
+              completionAttempts >= this.MAX_COMPLETION_RECHECK_ATTEMPTS
+            ) {
+              console.warn(
+                `[LLM Chatbot Browser] Completion unresolved after ${this.MAX_COMPLETION_RECHECK_ATTEMPTS} attempts; promoting latest response snapshot (${completionDecision.reason})`,
+              )
+              this.clearCompletionRecheck(completionRecheckKey)
+            } else {
+              if (!canForcePromotionAfterRetries) {
+                this.clearCompletionRecheck(completionRecheckKey)
+              }
+              continue
+            }
+          } else {
+            this.clearCompletionRecheck(completionRecheckKey)
+          }
+        } else if (
           interaction.type === 'response' &&
           typeof this.parser.isResponseComplete === 'function' &&
           !this.parser.isResponseComplete(interaction.content)
         ) {
           continue
         }
-
-        // Extract sources immediately if this is a response (don't wait until transmission)
-        let extractedSources: (ExtractedSource | ExtractedSourceGroup)[] = []
-        if (interaction.type === 'response' && typeof this.parser.extractSources === 'function') {
-          try {
-            const sourceToggleSelector = this.parser?.selectors?.sourceToggleButton
-            const responseContainerRef: Element | undefined =
-              typeof this.parser.resolveContainer === 'function'
-                ? this.parser.resolveContainer(interaction.content)
-                : undefined
-
-            // Non-panel parsers should extract immediately.
-            // Panel-based parsers should still attempt extraction immediately so
-            // turn-complete empty-source states can be finalized without waiting
-            // on a separate toggle-visibility pass.
-            if (!sourceToggleSelector) {
-              extractedSources = this.parser.extractSources(interaction.content)
-              if (extractedSources.length > 0) {
-                console.log(`[LLM Chatbot Browser] Extracted ${extractedSources.length} sources immediately for response`)
-                // Close the sources panel after extraction completes
-                if (typeof this.parser.closeSourcesPanel === 'function') {
-                  this.parser.closeSourcesPanel()
-                }
-              }
-            } else {
-              const sourcesButton = responseContainerRef?.querySelector(sourceToggleSelector) || null
-              extractedSources = this.parser.extractSources(responseContainerRef ?? interaction.content)
-              if (sourcesButton) {
-                if (extractedSources.length > 0) {
-                  console.log(`[LLM Chatbot Browser] Extracted ${extractedSources.length} sources immediately for response (sources button detected in DOM)`)
-                  if (typeof this.parser.closeSourcesPanel === 'function') {
-                    this.parser.closeSourcesPanel()
-                  }
-                }
-              } else {
-                console.log(`[LLM Chatbot Browser] Response detected without visible source toggle in turn container; extraction still attempted`)
-              }
-            }
-          } catch (error) {
-            console.error('[LLM Chatbot Browser] Error extracting sources immediately:', error)
-          }
-        }
-
-        const responseContainerRef: Element | undefined =
-          interaction.type === 'response' && typeof this.parser.resolveContainer === 'function'
-            ? this.parser.resolveContainer(interaction.content)
-            : undefined
 
         // Generate a scoped key for this content.
         const basePrefixKey = this.getPrefixKey(interaction.content, interaction.type, responseContainerRef)
@@ -789,12 +965,151 @@ class LLMChatbotBrowserModule extends REXClientModule {
               ? `${basePrefixKey}:qid-${parserQuestionTurnId}`
               : `${basePrefixKey}:turn-${nextTurnNumber}`
         }
+        const responseTurnFallbackKey = interaction.type === 'response'
+          ? `response-turn:${nextTurnNumber}:${interaction.content.trim().substring(0, this.PREFIX_LENGTH).replace(/\s+/g, ' ')}`
+          : undefined
         const currentLength = interaction.content.length
         // For questions the prefixKey carries a session-scoped suffix (:qts-/qid-/turn-).
         // After a reload the suffix differs, so also check the stable base key which is
         // what the checkpoint restores. Responses use basePrefixKey directly; no change needed.
         const existingCapture = this.capturedPrefixes.get(prefixKey)
           ?? (interaction.type === 'question' ? this.capturedPrefixes.get(basePrefixKey) : undefined)
+          ?? (interaction.type === 'response' && responseTurnFallbackKey ? this.capturedPrefixes.get(responseTurnFallbackKey) : undefined)
+
+        // Extract sources immediately if this is a response (don't wait until transmission)
+        let extractedSources: (ExtractedSource | ExtractedSourceGroup)[] = []
+        let sourceExtractionState: LLMInteraction['source_extraction'] | undefined = undefined
+        if (
+          interaction.type === 'response' &&
+          typeof this.parser.extractSources === 'function' &&
+          (!existingCapture || currentLength > existingCapture.length)
+        ) {
+          try {
+            const sourceToggleSelector = this.parser?.selectors?.sourceToggleButton
+            const isPerplexityParser = this.parser?.name === 'perplexity'
+
+            // Non-panel parsers should extract immediately.
+            // Panel-based parsers should still attempt extraction immediately so
+            // turn-complete empty-source states can be finalized without waiting
+            // on a separate toggle-visibility pass.
+            if (isPerplexityParser) {
+              const sourceToggleSelector = this.parser?.selectors?.sourceToggleButton
+              const sourceDetailSelector = this.parser?.selectors?.sourceDetailAnchors
+              const sourceCloseSelector = this.parser?.selectors?.sourceCloseButton
+              const panelContainerSelector = 'side-bar-sources, context-sidebar, .all-sources, .sources-list'
+              const panelLifecycleObserver = this.createPerplexityPanelLifecycleObserver(
+                sourceCloseSelector,
+                panelContainerSelector,
+                sourceDetailSelector,
+              )
+
+              const toggleInTurn = sourceToggleSelector && responseContainerRef
+                ? responseContainerRef.querySelector(sourceToggleSelector)
+                : null
+              const openPanelCandidates = document.querySelectorAll(panelContainerSelector).length
+              const detailAnchorsVisible = sourceDetailSelector
+                ? document.querySelectorAll(sourceDetailSelector).length
+                : 0
+              const closeButtonsVisible = sourceCloseSelector
+                ? document.querySelectorAll(sourceCloseSelector).length
+                : 0
+              const panelPresentBySignals = closeButtonsVisible > 0
+
+              console.log(
+                `[LLM Chatbot Browser] Perplexity pre-extract panel state: ` +
+                `toggle_in_turn=${toggleInTurn ? 'yes' : 'no'} ` +
+                `open_panels=${openPanelCandidates} ` +
+                `detail_anchors=${detailAnchorsVisible} ` +
+                `close_buttons=${closeButtonsVisible} ` +
+                `panel_present=${panelPresentBySignals ? 'yes' : 'no'}`,
+              )
+
+              try {
+                const extractionResult = await this.parser.extractSources(responseContainerRef ?? interaction.content)
+                if (this.isPerplexityTerminalSourceResult(extractionResult)) {
+                  extractedSources = extractionResult.sources
+                  sourceExtractionState = extractionResult.source_extraction
+
+                  const shouldAttemptClose = !!extractionResult.close_panel
+                  if (shouldAttemptClose && typeof this.parser.abortSourceExtraction === 'function') {
+                    this.parser.abortSourceExtraction(responseContainerRef ?? interaction.content)
+
+                    const postClosePanelCandidates = document.querySelectorAll(panelContainerSelector).length
+                    const postCloseDetailAnchors = sourceDetailSelector
+                      ? document.querySelectorAll(sourceDetailSelector).length
+                      : 0
+                    const postCloseButtonsVisible = sourceCloseSelector
+                      ? document.querySelectorAll(sourceCloseSelector).length
+                      : 0
+                    const postClosePanelPresent = postCloseButtonsVisible > 0
+
+                    console.log(
+                      `[LLM Chatbot Browser] Perplexity post-close attempt: ` +
+                      `open_panels=${postClosePanelCandidates} ` +
+                      `detail_anchors=${postCloseDetailAnchors} ` +
+                      `close_buttons=${postCloseButtonsVisible} ` +
+                      `panel_present=${postClosePanelPresent ? 'yes' : 'no'}`,
+                    )
+                  }
+
+                  console.log(
+                    `[LLM Chatbot Browser] Perplexity terminal source result: ${sourceExtractionState} (${extractedSources.length} groups)`,
+                  )
+                } else if (Array.isArray(extractionResult)) {
+                  extractedSources = extractionResult
+                  sourceExtractionState = extractedSources.length > 0 ? 'success' : 'terminal_empty'
+                } else {
+                  sourceExtractionState = 'data_capture_error'
+                }
+              } finally {
+                panelLifecycleObserver.stop('extract-cycle')
+              }
+            } else if (!sourceToggleSelector) {
+              extractedSources = this.parser.extractSources(interaction.content)
+              if (this.parser?.name === 'chatgpt') {
+                sourceExtractionState = 'success'
+              } else if (this.parser?.name === 'gemini' && typeof this.parser.getSourceExtractionStatus === 'function') {
+                sourceExtractionState =
+                  this.parser.getSourceExtractionStatus(responseContainerRef ?? interaction.content) ||
+                  (extractedSources.length > 0 ? 'success' : 'none')
+              }
+              if (extractedSources.length > 0) {
+                console.log(`[LLM Chatbot Browser] Extracted ${extractedSources.length} sources immediately for response`)
+                // Close the sources panel after extraction completes
+                if (typeof this.parser.closeSourcesPanel === 'function') {
+                  this.parser.closeSourcesPanel()
+                }
+              }
+            } else {
+              const sourcesButton = responseContainerRef?.querySelector(sourceToggleSelector) || null
+              extractedSources = this.parser.extractSources(responseContainerRef ?? interaction.content)
+              if (this.parser?.name === 'chatgpt') {
+                sourceExtractionState = 'success'
+              } else if (this.parser?.name === 'gemini' && typeof this.parser.getSourceExtractionStatus === 'function') {
+                sourceExtractionState =
+                  this.parser.getSourceExtractionStatus(responseContainerRef ?? interaction.content) ||
+                  (extractedSources.length > 0 ? 'success' : 'none')
+              }
+              if (sourcesButton) {
+                if (extractedSources.length > 0) {
+                  console.log(`[LLM Chatbot Browser] Extracted ${extractedSources.length} sources immediately for response (sources button detected in DOM)`)
+                  if (typeof this.parser.closeSourcesPanel === 'function') {
+                    this.parser.closeSourcesPanel()
+                  }
+                }
+              } else {
+                console.log(`[LLM Chatbot Browser] Response detected without visible source toggle in turn container; extraction still attempted`)
+              }
+            }
+          } catch (error) {
+            console.error('[LLM Chatbot Browser] Error extracting sources immediately:', error)
+            if (this.parser?.name === 'chatgpt') {
+              sourceExtractionState = 'failed'
+            } else if (this.parser?.name === 'gemini') {
+              sourceExtractionState = 'data_capture_error'
+            }
+          }
+        }
 
         if (existingCapture) {
           if (interaction.type === 'response' && extractedSources.length > 0) {
@@ -836,6 +1151,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
             conversation_id: this.getEffectiveConversationId(),
             turn_number: nextTurnNumber,
             sources: interaction.type === 'response' ? extractedSources : [],
+            source_extraction: interaction.type === 'response' ? sourceExtractionState : undefined,
           }
           if (newInteraction.type === 'response') {
             console.log(`[LLM Chatbot Browser] Response update created with ${newInteraction.sources?.length || 0} sources`)
@@ -843,6 +1159,9 @@ class LLMChatbotBrowserModule extends REXClientModule {
 
           // Update the map with new ID and length
           this.capturedPrefixes.set(prefixKey, { interaction_id: newId, length: currentLength })
+          if (responseTurnFallbackKey) {
+            this.capturedPrefixes.set(responseTurnFallbackKey, { interaction_id: newId, length: currentLength })
+          }
           if (typeof parserQuestionTimestamp === 'number' && parserQuestionTimestamp > this.captureCheckpointMaxQts) {
             this.captureCheckpointMaxQts = parserQuestionTimestamp
           }
@@ -868,12 +1187,16 @@ class LLMChatbotBrowserModule extends REXClientModule {
             conversation_id: this.getEffectiveConversationId(),
             turn_number: nextTurnNumber,
             sources: interaction.type === 'response' ? extractedSources : [],
+            source_extraction: interaction.type === 'response' ? sourceExtractionState : undefined,
           }
           if (newInteraction.type === 'response') {
             console.log(`[LLM Chatbot Browser] Response created with ${newInteraction.sources?.length || 0} sources`)
           }
 
           this.capturedPrefixes.set(prefixKey, { interaction_id: newId, length: currentLength })
+          if (responseTurnFallbackKey) {
+            this.capturedPrefixes.set(responseTurnFallbackKey, { interaction_id: newId, length: currentLength })
+          }
           if (typeof parserQuestionTimestamp === 'number' && parserQuestionTimestamp > this.captureCheckpointMaxQts) {
             this.captureCheckpointMaxQts = parserQuestionTimestamp
           }
@@ -891,10 +1214,26 @@ class LLMChatbotBrowserModule extends REXClientModule {
 
           if (
             newInteraction.type === 'response' &&
+            this.parser?.name !== 'perplexity' &&
             hasPanelSourceToggle &&
             (!newInteraction.sources || newInteraction.sources.length === 0) &&
             !sourceExtractionComplete
           ) {
+            const retryGuardKey = this.getResponseRetryGuardKey(newInteraction.content)
+            if (this.sourceRetryExhaustedKeys.has(retryGuardKey)) {
+              console.warn('[LLM Chatbot Browser] Source retries previously exhausted for this response content; bypassing pending queue')
+              this.interactions.push(newInteraction)
+              if (this.interactions.length >= this.batchSize) {
+                console.log(`[LLM Chatbot Browser] Batch full (${this.interactions.length}), triggering transmission`)
+                this.transmitBatch()
+              }
+              newCaptureCount++
+              console.log(
+                `[LLM Chatbot Browser] Captured ${interaction.type}: ${interaction.content.substring(0, 50)}...`,
+              )
+              continue
+            }
+
             console.log(`[LLM Chatbot Browser] Response deferred to pending queue (turn-scoped source retry enabled)`)
             // Store the container element now so deferred extraction remains pinned to this turn.
             const existingPending = this.pendingSourcesExtraction.get(prefixKey)
@@ -905,7 +1244,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
               unresolvedRetryCount: 0,
             })
             // Trigger the first extraction pass immediately for this turn.
-            this.promoteReadyResponses()
+            this.promoteReadyResponses('initial')
           } else {
             // Questions or responses with sources go directly to transmission queue
             this.interactions.push(newInteraction)
@@ -929,7 +1268,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
       }
 
       // Mutation-driven pending promotion: re-evaluate pending entries whenever DOM changes.
-      this.promoteReadyResponses()
+      this.promoteReadyResponses('general')
 
       // Event-driven flush: when nothing is pending, transmit queued interactions now.
       if (this.pendingSourcesExtraction.size === 0 && this.interactions.length > 0) {
@@ -939,6 +1278,16 @@ class LLMChatbotBrowserModule extends REXClientModule {
       console.debug(`[LLM Chatbot Browser] Pending for transmission: ${this.interactions.length}`)
     } catch (error) {
       console.error('[LLM Chatbot Browser] Error processing page:', error)
+    } finally {
+      this.processInFlight = false
+      if (this.processQueued) {
+        this.processQueued = false
+        setTimeout(() => {
+          void this.processPage().catch((error) => {
+            console.error('[LLM Chatbot Browser] Error in queued page processing:', error)
+          })
+        }, 0)
+      }
     }
   }
 
@@ -948,9 +1297,32 @@ class LLMChatbotBrowserModule extends REXClientModule {
     * Extraction is turn-scoped and mutation-driven until parser marks the turn complete.
    * Also collects MutationObserver panel lifecycle validation.
    */
-  private promoteReadyResponses(): void {
+  private promoteReadyResponses(trigger: 'general' | 'initial' | 'turn-retry' = 'general'): void {
     const toRemove: string[] = []
     let promotedCount = 0
+
+    // Perplexity now resolves extraction terminally in processPage.
+    // If any stale pending entries remain from a prior runtime state, flush them safely.
+    if (this.parser?.name === 'perplexity') {
+      for (const [prefixKey, pending] of this.pendingSourcesExtraction.entries()) {
+        this.disconnectTurnRetryObserver(pending)
+        pending.interaction.source_extraction = pending.interaction.source_extraction || 'data_capture_error'
+        this.interactions.push(pending.interaction)
+        toRemove.push(prefixKey)
+        promotedCount += 1
+      }
+
+      for (const key of toRemove) {
+        const pendingEntry = this.pendingSourcesExtraction.get(key)
+        this.disconnectTurnRetryObserver(pendingEntry)
+        this.pendingSourcesExtraction.delete(key)
+      }
+
+      if (promotedCount > 0) {
+        console.log(`[LLM Chatbot Browser] Flushed ${promotedCount} stale pending Perplexity entries after terminal extraction migration`)
+      }
+      return
+    }
 
     for (const [prefixKey, pending] of this.pendingSourcesExtraction.entries()) {
       // Check if sources button is visible (sources ready to extract) for panel-based parsers only.
@@ -988,6 +1360,9 @@ class LLMChatbotBrowserModule extends REXClientModule {
           if (updatedSources && updatedSources.length > 0) {
             pending.unresolvedRetryCount = 0
             pending.interaction.sources = updatedSources
+            if (this.parser?.name === 'gemini') {
+              pending.interaction.source_extraction = 'success'
+            }
             console.log(
               `[LLM Chatbot Browser] Extracted ${updatedSources.length} sources`,
             )
@@ -995,6 +1370,11 @@ class LLMChatbotBrowserModule extends REXClientModule {
             if (typeof this.parser?.isSourceExtractionComplete === 'function') {
               const complete = this.parser.isSourceExtractionComplete(pending.containerRef ?? pending.interaction.content)
               if (complete) {
+                if (this.parser?.name === 'gemini' && typeof this.parser.getSourceExtractionStatus === 'function') {
+                  pending.interaction.source_extraction =
+                    this.parser.getSourceExtractionStatus(pending.containerRef ?? pending.interaction.content) ||
+                    'none'
+                }
                 this.disconnectTurnRetryObserver(pending)
                 this.interactions.push(pending.interaction)
                 promotedCount++
@@ -1003,11 +1383,18 @@ class LLMChatbotBrowserModule extends REXClientModule {
                 continue
               }
             }
-            pending.unresolvedRetryCount += 1
+            const shouldCountRetry = trigger === 'initial' || trigger === 'turn-retry'
+            if (shouldCountRetry) {
+              pending.unresolvedRetryCount += 1
+            }
             if (pending.unresolvedRetryCount >= this.MAX_PENDING_SOURCE_RETRIES) {
               console.warn(
                 `[LLM Chatbot Browser] Source extraction unresolved after ${pending.unresolvedRetryCount} retries; promoting response with current sources`,
               )
+              if (this.parser?.name === 'gemini') {
+                pending.interaction.source_extraction = sourcesButtonVisible ? 'terminal_empty' : 'panel_opening_failure'
+              }
+              this.sourceRetryExhaustedKeys.add(this.getResponseRetryGuardKey(pending.interaction.content))
               this.disconnectTurnRetryObserver(pending)
               if (typeof this.parser?.abortSourceExtraction === 'function') {
                 this.parser.abortSourceExtraction(pending.containerRef ?? pending.interaction.content)
@@ -1019,9 +1406,13 @@ class LLMChatbotBrowserModule extends REXClientModule {
             }
             // Sources are still unresolved for this turn. Arm a turn-scoped retry that
             // re-attempts extraction only when source-detail DOM mutates for this response.
-            console.log(
-              `[LLM Chatbot Browser] Pending source extraction retry ${pending.unresolvedRetryCount}/${this.MAX_PENDING_SOURCE_RETRIES} for this turn`,
-            )
+            if (shouldCountRetry) {
+              console.log(
+                `[LLM Chatbot Browser] Pending source extraction retry ${pending.unresolvedRetryCount}/${this.MAX_PENDING_SOURCE_RETRIES} for this turn`,
+              )
+            } else {
+              console.log('[LLM Chatbot Browser] Pending source extraction unresolved (general mutation pass; retry counter unchanged)')
+            }
             this.armTurnScopedRetry(prefixKey, pending)
             continue
           }
@@ -1106,6 +1497,21 @@ class LLMChatbotBrowserModule extends REXClientModule {
       if (this.interactions.length === 0) {
         console.debug('[LLM Chatbot Browser] No interactions to transmit')
         return
+      }
+
+      // ChatGPT transmission is gated by parser completion (copy-button/full-render signal).
+      // This keeps queued question/response data local until the turn reaches a complete state.
+      if (
+        this.parser?.name === 'chatgpt' &&
+        typeof this.parser.getCompletionDecision === 'function'
+      ) {
+        const decision = this.parser.getCompletionDecision() as ChatGPTCompletionDecision
+        if (!decision.completed) {
+          console.log(
+            `[LLM Chatbot Browser] Holding transmission until ChatGPT completion signal is observed (${decision.reason})`,
+          )
+          return
+        }
       }
 
       // Only transmit interactions that have a conversation_id

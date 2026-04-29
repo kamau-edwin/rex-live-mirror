@@ -2,7 +2,8 @@ import { REXServiceWorkerModule, registerREXModule, dispatchEvent } from '@bric/
 
 /**
  * LLM Chatbot Module - Service Worker Context
- * Responsible for: capturing ChatGPT chats (history + live), batching data, coordinating transmission via PDK
+ * Responsible for: receiving multi-platform LLM interaction batches, deduplicating Q/A pairs,
+ * and dispatching normalized chatbot events for downstream transmission.
  */
 class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
   private enabled: boolean = false
@@ -61,8 +62,7 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
         }
       }
     })
-    // Note: Removed storage change listener - using message-based transmission only
-    // to prevent duplicate processing (storage + message would cause 2x dispatches)
+    // Use message-based transmission only to avoid double-processing from mixed storage/message flows.
   }
 
   handleMessage(message:any, sender:any, sendResponse:(response:any) => void):boolean { // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -255,6 +255,7 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
                 content: interaction.content,
                 length: interaction.length,
                 sources: interaction.sources,
+                source_extraction: interaction.source_extraction,
               },
               conversation_id: interaction.conversation_id || pendingQuestion.conversation_id,
             }
@@ -512,7 +513,7 @@ class ChatGPTCaptureManager {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private async queueForPDKTransmission(_data: any): Promise<void> {
     console.log('[ChatGPT Capture] queueForPDKTransmission called')
-    // Implementation continues...
+    // Intentionally no-op in current flow; live dispatch happens in handleInteractionBatch().
   }
 
   /**

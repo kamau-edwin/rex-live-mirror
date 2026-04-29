@@ -31,6 +31,20 @@ export interface ChatGPTConfig {
   selectors?: ChatGPTSelectors
 }
 
+export interface ChatGPTCompletionDecision {
+  completed: boolean
+  reason:
+    | 'complete'
+    | 'selector_validation_failed'
+    | 'streaming'
+    | 'empty_assistant_content'
+    | 'copy_button_missing'
+    | 'stability_pending'
+    | 'truncated_marker'
+  shouldRecheck: boolean
+  recheckDelayMs?: number
+}
+
 export class ChatGPTParser {
   name = 'chatgpt'
   selectors: ChatGPTSelectors
@@ -141,10 +155,14 @@ export class ChatGPTParser {
     return interactions
   }
 
-  isResponseComplete(): boolean {
+  getCompletionDecision(): ChatGPTCompletionDecision {
     if (this.selectorValidationError) {
       console.error('[ChatGPTParser] Cannot validate completion - selector validation failed:', this.selectorValidationError)
-      return false
+      return {
+        completed: false,
+        reason: 'selector_validation_failed',
+        shouldRecheck: false,
+      }
     }
 
     const stopGeneratingSelector = this.selectors.stopGeneratingButton
@@ -162,23 +180,39 @@ export class ChatGPTParser {
 
     if (document.querySelector(stopGeneratingSelector)) {
       console.log('[ChatGPTParser] Response still streaming - stop generating button detected')
-      return false
+      return {
+        completed: false,
+        reason: 'streaming',
+        shouldRecheck: true,
+      }
     }
 
     const latestAssistantMsg = getLastMatchedElement(assistantSelector)
     if (latestAssistantMsg?.getAttribute('aria-busy') === 'true') {
       console.log('[ChatGPTParser] Response still streaming - aria-busy="true" detected')
-      return false
+      return {
+        completed: false,
+        reason: 'streaming',
+        shouldRecheck: true,
+      }
     }
 
     if (document.querySelector(writingBlockSelector)) {
       console.log('[ChatGPTParser] Response still streaming - writing block detected')
-      return false
+      return {
+        completed: false,
+        reason: 'streaming',
+        shouldRecheck: true,
+      }
     }
 
     if (document.querySelector(streamActiveSelector)) {
       console.log('[ChatGPTParser] Response still streaming - stream active marker detected')
-      return false
+      return {
+        completed: false,
+        reason: 'streaming',
+        shouldRecheck: true,
+      }
     }
 
     const latestMarkdown = latestAssistantMsg?.querySelector(assistantContentSelector)
@@ -188,13 +222,21 @@ export class ChatGPTParser {
 
     if (!latestContent) {
       console.log('[ChatGPTParser] Response incomplete - empty assistant content')
-      return false
+      return {
+        completed: false,
+        reason: 'empty_assistant_content',
+        shouldRecheck: true,
+      }
     }
 
     // MANDATORY: Copy button MUST appear on the latest turn - hard completion signal
     if (!hasCopyResponseButton) {
       console.log('[ChatGPTParser] Response incomplete - copy button not found on latest turn (awaiting completion)')
-      return false
+      return {
+        completed: false,
+        reason: 'copy_button_missing',
+        shouldRecheck: false,
+      }
     }
 
     // Track response stability: ensure content isn't still being streamed/mutated
@@ -204,21 +246,41 @@ export class ChatGPTParser {
       this.lastResponseSnapshot = latestContent
       this.stableResponseChecks = 0
       console.log('[ChatGPTParser] Response changed - waiting for stability before capture')
-      return false
+      return {
+        completed: false,
+        reason: 'stability_pending',
+        shouldRecheck: true,
+      }
     }
 
     if (this.stableResponseChecks < 1) {
       console.log('[ChatGPTParser] Waiting one extra poll for response stability')
-      return false
+      return {
+        completed: false,
+        reason: 'stability_pending',
+        shouldRecheck: true,
+      }
     }
 
     if (/\n\s*\d+\.\s*$/.test(latestContent)) {
       console.log('[ChatGPTParser] Response appears truncated at list marker, waiting for continuation')
-      return false
+      return {
+        completed: false,
+        reason: 'truncated_marker',
+        shouldRecheck: true,
+      }
     }
 
     console.log('[ChatGPTParser] Response appears complete')
-    return true
+    return {
+      completed: true,
+      reason: 'complete',
+      shouldRecheck: false,
+    }
+  }
+
+  isResponseComplete(): boolean {
+    return this.getCompletionDecision().completed
   }
 
   extractSources(): ExtractedSource[] {

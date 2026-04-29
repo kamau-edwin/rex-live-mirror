@@ -55,6 +55,13 @@ export interface ExtractedSourceGroup {
   sources: ExtractedSource[]
 }
 
+export type GeminiSourceExtractionClassification =
+  | 'success'
+  | 'none'
+  | 'terminal_empty'
+  | 'data_capture_error'
+  | 'panel_opening_failure'
+
 export class GeminiParser {
   name = 'gemini'
   selectors: GeminiSelectors
@@ -66,6 +73,7 @@ export class GeminiParser {
   private selectorValidationError: string | null = null
   private responseContainerIds = new Map<Element, string>()
   private responseContainerSequence = 0
+  private sourceExtractionStatusByResponseId = new Map<string, GeminiSourceExtractionClassification>()
   // Keyed by "normalizedContent:index" so that DOM remounts of the same question
   // return the same timestamp, while a genuinely new identical question at a
   // different position in the conversation gets a distinct timestamp.
@@ -238,6 +246,20 @@ export class GeminiParser {
     const currentResponseId = questionForTurn ? `${questionForTurn}:${responseContainerId}` : responseContainerId
 
     return !!currentResponseId && this.extractedResponseIds.has(currentResponseId)
+  }
+
+  public getSourceExtractionStatus(responseContentOrContainer?: string | Element): GeminiSourceExtractionClassification | undefined {
+    const responseContainer: Element | undefined = responseContentOrContainer instanceof Element
+      ? responseContentOrContainer
+      : this.findResponseContainerForContent(responseContentOrContainer)
+    if (!responseContainer) {
+      return undefined
+    }
+
+    const questionForTurn = this.getQuestionForResponseContainer(responseContainer)
+    const responseContainerId = this.getOrCreateResponseContainerId(responseContainer)
+    const currentResponseId = questionForTurn ? `${questionForTurn}:${responseContainerId}` : responseContainerId
+    return this.sourceExtractionStatusByResponseId.get(currentResponseId)
   }
 
   public abortSourceExtraction(responseContentOrContainer?: string | Element): void {
@@ -928,6 +950,7 @@ export class GeminiParser {
       }
       clearPanelOwnership()
       if (currentResponseId) { this.extractedResponseIds.add(currentResponseId) }
+      if (currentResponseId) { this.sourceExtractionStatusByResponseId.set(currentResponseId, 'none') }
       if (currentResponseId) { this.loggedCompletedSkipResponseIds.delete(currentResponseId) }
       console.log(reason)
       return []
@@ -941,6 +964,7 @@ export class GeminiParser {
       }
       clearPanelOwnership()
       if (currentResponseId) { this.extractedResponseIds.add(currentResponseId) }
+      if (currentResponseId) { this.sourceExtractionStatusByResponseId.set(currentResponseId, 'success') }
       if (currentResponseId) { this.loggedCompletedSkipResponseIds.delete(currentResponseId) }
       console.log(`[GeminiParser] Response extraction complete (found ${dedupedSources.length} sources)`)
     } else {
