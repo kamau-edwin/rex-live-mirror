@@ -389,7 +389,9 @@ export class PerplexityParser {
 
     const candidates = Array.from(container.querySelectorAll(toggleSelector))
     const matched = candidates.find((candidate) => this.isSourcesToggleButton(candidate))
-    return (matched as HTMLElement | undefined) || null
+    // During early render the toggle text can be empty; keep a structural fallback
+    // so extraction can proceed on a valid configured selector match.
+    return ((matched || candidates[0]) as HTMLElement | undefined) || null
   }
 
   private getVisibleSourceCountSignal(sourceToggle: HTMLElement | null): number {
@@ -706,6 +708,20 @@ export class PerplexityParser {
     if (activePanelAtStart && !this.panelMatchesQuestion(activePanelAtStart, questionForTurn)) {
       this.closeSourcesPanel(responseContainer)
       this.panelOpenedByParserForResponseId = undefined
+    }
+
+    // Some UI variants expose only close-button signals before tabpanel metadata is
+    // available. If that stale panel is left open, the next toggle click can close
+    // instead of open and cause a false extraction failure.
+    if (!activePanelAtStart) {
+      const configuredCloseSelector = this.resolveSelector('sourceCloseButton')
+      const staleCloseButton = configuredCloseSelector
+        ? document.querySelector(configuredCloseSelector) as HTMLElement | null
+        : null
+      if (staleCloseButton) {
+        staleCloseButton.click()
+        this.panelOpenedByParserForResponseId = undefined
+      }
     }
 
     // Hard reset stale ownership when a new turn starts extraction.
