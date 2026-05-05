@@ -170,6 +170,10 @@ class LLMChatbotBrowserModule extends REXClientModule {
 
     // Get platform-specific configs
     const platforms = llmConfig.platforms || {}
+    const geminiAppPathMatched =
+      path === '/app' ||
+      path.startsWith('/app/') ||
+      /^\/u\/\d+\/app(?:\/|$)/.test(path)
 
     // Match current page to chatbot source (only if source is enabled)
     try {
@@ -181,7 +185,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
         const chatgptConfig = platforms.chatgpt || {}
         this.parser = new ChatGPTParser(chatgptConfig)
         console.log('[LLM Chatbot Browser] ChatGPT parser initialized with config')
-      } else if (enabledSources.includes('gemini') && host === 'gemini.google.com' && path.startsWith('/app')) {
+      } else if (enabledSources.includes('gemini') && host === 'gemini.google.com' && geminiAppPathMatched) {
         const geminiConfig = platforms.gemini || {}
         this.parser = new GeminiParser(geminiConfig)
         console.log('[LLM Chatbot Browser] Gemini parser initialized with config')
