@@ -7,6 +7,26 @@ import { test, expect } from '@playwright/test'
  */
 
 test.describe('Browser Module -- URL Routing', () => {
+  const isGeminiCaptureEligiblePath = (path: string): boolean => {
+    if (!path || path === '/') {
+      return true
+    }
+
+    const deniedPrefixes = [
+      '/updates',
+      '/about',
+      '/privacy',
+      '/terms',
+      '/policies',
+      '/intl',
+      '/auth',
+      '/signin',
+      '/login',
+    ]
+
+    return !deniedPrefixes.some((prefix) => path === prefix || path.startsWith(prefix + '/'))
+  }
+
   // URL routing logic is tested by examining what the browser module does
   // when it encounters different URLs. Since we can't change window.location
   // in tests, we test the routing logic indirectly through config and DOM inspection.
@@ -40,6 +60,21 @@ test.describe('Browser Module -- URL Routing', () => {
     // No messages should have been sent (no parser initialized = no captures)
     const sentMessages = await page.evaluate(() => (window as any).__sentMessages)
     expect(sentMessages.length).toBe(0)
+  })
+
+  test('Gemini matching is broad across chat-like paths', () => {
+    expect(isGeminiCaptureEligiblePath('/')).toBe(true)
+    expect(isGeminiCaptureEligiblePath('/app')).toBe(true)
+    expect(isGeminiCaptureEligiblePath('/app/abc123')).toBe(true)
+    expect(isGeminiCaptureEligiblePath('/u/0/app/abc123')).toBe(true)
+    expect(isGeminiCaptureEligiblePath('/workspace/turn/123')).toBe(true)
+  })
+
+  test('Gemini matching excludes obvious non-chat paths', () => {
+    expect(isGeminiCaptureEligiblePath('/privacy')).toBe(false)
+    expect(isGeminiCaptureEligiblePath('/terms')).toBe(false)
+    expect(isGeminiCaptureEligiblePath('/auth')).toBe(false)
+    expect(isGeminiCaptureEligiblePath('/auth/login')).toBe(false)
   })
 })
 

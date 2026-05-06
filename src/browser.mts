@@ -170,10 +170,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
 
     // Get platform-specific configs
     const platforms = llmConfig.platforms || {}
-    const geminiAppPathMatched =
-      path === '/app' ||
-      path.startsWith('/app/') ||
-      /^\/u\/\d+\/app(?:\/|$)/.test(path)
+    const geminiCaptureEligible = this.isGeminiCaptureEligiblePath(path)
 
     // Match current page to chatbot source (only if source is enabled)
     try {
@@ -185,7 +182,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
         const chatgptConfig = platforms.chatgpt || {}
         this.parser = new ChatGPTParser(chatgptConfig)
         console.log('[LLM Chatbot Browser] ChatGPT parser initialized with config')
-      } else if (enabledSources.includes('gemini') && host === 'gemini.google.com' && geminiAppPathMatched) {
+      } else if (enabledSources.includes('gemini') && host === 'gemini.google.com' && geminiCaptureEligible) {
         const geminiConfig = platforms.gemini || {}
         this.parser = new GeminiParser(geminiConfig)
         console.log('[LLM Chatbot Browser] Gemini parser initialized with config')
@@ -215,6 +212,26 @@ class LLMChatbotBrowserModule extends REXClientModule {
     } catch (error) {
       console.error('[LLM Chatbot Browser] Error initializing chatbot capture:', error)
     }
+  }
+
+  private isGeminiCaptureEligiblePath(path: string): boolean {
+    if (!path || path === '/') {
+      return true
+    }
+
+    const deniedPrefixes = [
+      '/updates',
+      '/about',
+      '/privacy',
+      '/terms',
+      '/policies',
+      '/intl',
+      '/auth',
+      '/signin',
+      '/login',
+    ]
+
+    return !deniedPrefixes.some((prefix) => path === prefix || path.startsWith(prefix + '/'))
   }
 
   private reportSelectorDiagnostics(validation: any): void {
