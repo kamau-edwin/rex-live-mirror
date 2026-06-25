@@ -15,6 +15,11 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
   private readonly QA_HASH_STORAGE_KEY: string = 'llm_transmitted_qa_hashes'
   private readonly QA_HASH_MAX_SIZE: number = 1000
   private pendingQuestionByConversation: Map<string, any> = new Map()
+  private questionTimestamps: Map<string, number> = new Map() // Track when questions were added (for cleanup)
+  private pendingResponsesByConversation: Map<string, any[]> = new Map() // Track responses received before their questions
+  private readonly ORPHANED_QUESTION_TIMEOUT_MS: number = 5 * 60 * 1000 // 5 minutes
+  private readonly EARLY_RESPONSE_TIMEOUT_MS: number = 30 * 1000 // 30 seconds (wait for question to arrive)
+  private cleanupIntervalId: NodeJS.Timeout | null = null
 
   constructor() {
     super()
@@ -59,6 +64,12 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
             )
             console.log('[LLM Chatbot] ChatGPT capture manager initialized')
           }
+
+          // Start orphaned question cleanup interval (every 30 seconds)
+          this.cleanupIntervalId = setInterval(() => {
+            this.cleanupOrphanedQuestions()
+          }, 30 * 1000)
+          console.log('[LLM Chatbot] Orphaned question cleanup interval started')
         }
       }
     })
@@ -159,6 +170,24 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
     chrome.storage.local.set({ [this.QA_HASH_STORAGE_KEY]: serialized })
   }
 
+  /**
+   * Generates a safe fallback conversation key when conversation_id is missing.
+   * This prevents collisions by using source, tab/referrer info, and timestamp.
+   * Format: 'fallback_{source}_{sanitized_tab_id}_{ms_since_epoch}'
+   */
+  private generateFallbackConversationKey(interaction: any): string {
+    const source = (interaction?.source || 'unknown').replace(/[^a-z0-9_]/gi, '_')
+    const tabId = (interaction?.tab_id || 'notab').toString().slice(0, 20).replace(/[^a-z0-9_]/gi, '_')
+    const questionTs = Math.floor((interaction?.timestamp ?? Date.now()) / 1000) // Convert to seconds for shorter key
+    
+    // Log the fallback key generation for debugging
+    console.warn(
+      `[LLM Chatbot] Generated fallback conversation key (no conversation_id from ${source}): ${source}_${tabId}_${questionTs}`
+    )
+    
+    return `fallback_${source}_${tabId}_${questionTs}`
+  }
+
   private handleInteractionBatch(interactions: any[]): void {
     console.log(`[LLM Chatbot] Service Worker received batch of ${interactions.length} interactions`)
     
@@ -207,11 +236,28 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
     })
 
     for (const interaction of sortedInteractions) {
-      const conversationKey = interaction?.conversation_id || '__no_conversation__'
+      // Use conversation_id if available, otherwise generate a unique fallback key
+      const conversationKey = interaction?.conversation_id ? 
+        interaction.conversation_id : 
+        this.generateFallbackConversationKey(interaction)
 
       if (interaction?.type === 'question') {
         // Keep only the latest pending question per conversation and dispatch only with a response.
         this.pendingQuestionByConversation.set(conversationKey, interaction)
+        this.questionTimestamps.set(conversationKey, Date.now()) // Track when this question was added
+        
+        // Check if there are any early responses waiting for this question
+        const earlyResponses = this.getAndCleanEarlyResponses(conversationKey)
+        for (const earlyResponse of earlyResponses) {
+          const validationResult = this.validateTimestampOrdering(interaction, earlyResponse)
+          if (validationResult.isValid) {
+            console.log(
+              `[LLM Chatbot] Processing early response that arrived before question (skew: ${validationResult.skewMs}ms)`
+            )
+            // Re-insert this response to be processed
+            sortedInteractions.push(earlyResponse)
+          }
+        }
         continue
       }
 
@@ -219,6 +265,15 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
         const pendingQuestion = this.pendingQuestionByConversation.get(conversationKey)
 
         if (pendingQuestion) {
+          // Validate timestamp ordering before correlation
+          const validationResult = this.validateTimestampOrdering(pendingQuestion, interaction)
+          if (!validationResult.isValid) {
+            // Clock skew detected: response arrived before question
+            this.storeEarlyResponse(conversationKey, interaction)
+            markTransmitted(interaction)
+            continue
+          }
+
           const qaHash = this.hashQaPair(pendingQuestion, interaction)
 
           if (this.transmittedQaHashes.has(qaHash)) {
@@ -231,6 +286,7 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
               markTransmitted(pendingQuestion)
               markTransmitted(interaction)
               this.pendingQuestionByConversation.delete(conversationKey)
+              this.questionTimestamps.delete(conversationKey) // Clean up timestamp tracking
               console.log(`[LLM Chatbot] Skipped duplicate qa_pair from ${interaction.source} (conversation: ${interaction.conversation_id})`)
               continue
             }
@@ -264,6 +320,7 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
           markTransmitted(pendingQuestion)
           markTransmitted(interaction)
           this.pendingQuestionByConversation.delete(conversationKey)
+          this.questionTimestamps.delete(conversationKey) // Clean up timestamp tracking
           this.transmittedQaHashes.add(qaHash)
           
           // Track if this hash was transmitted with sources
@@ -299,6 +356,118 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
     chrome.storage.local.set({ llm_interactions: [] })
     
     console.log(`[LLM Chatbot] Transmission complete. Total unique interactions tracked: ${this.transmittedHashes.size}`)
+  }
+
+  /**
+   * Cleans up orphaned questions that have been pending without a response for too long.
+   * This prevents memory leaks in the service worker's Map.
+   */
+  private cleanupOrphanedQuestions(): void {
+    const now = Date.now()
+    const conversationKeysToDelete: string[] = []
+
+    for (const [conversationKey, question] of this.pendingQuestionByConversation.entries()) {
+      const questionAddedTime = this.questionTimestamps.get(conversationKey)
+      if (!questionAddedTime) {
+        continue
+      }
+
+      const ageMs = now - questionAddedTime
+      if (ageMs > this.ORPHANED_QUESTION_TIMEOUT_MS) {
+        conversationKeysToDelete.push(conversationKey)
+      }
+    }
+
+    // Remove orphaned questions
+    for (const conversationKey of conversationKeysToDelete) {
+      const question = this.pendingQuestionByConversation.get(conversationKey)
+      this.pendingQuestionByConversation.delete(conversationKey)
+      this.questionTimestamps.delete(conversationKey)
+      
+      console.log(
+        `[LLM Chatbot] Cleaned up orphaned question after ${this.ORPHANED_QUESTION_TIMEOUT_MS / 1000}s (conversation: ${conversationKey}, source: ${question?.source || 'unknown'})`
+      )
+    }
+
+    if (conversationKeysToDelete.length > 0) {
+      console.log(`[LLM Chatbot] Orphaned question cleanup: removed ${conversationKeysToDelete.length} pending questions`)
+    }
+  }
+
+  /**
+   * Validates timestamp ordering and detects clock skew issues.
+   * Returns information about potential timing issues for observability.
+   */
+  private validateTimestampOrdering(question: any, response: any): {
+    isValid: boolean
+    skewDetected: boolean
+    skewMs: number
+  } {
+    const questionTs = Number(question?.question_timestamp ?? question?.timestamp ?? 0)
+    const responseTs = Number(response?.response_timestamp ?? response?.timestamp ?? 0)
+    
+    if (!questionTs || !responseTs) {
+      return { isValid: true, skewDetected: false, skewMs: 0 } // Can't validate without timestamps
+    }
+
+    const skewMs = responseTs - questionTs
+    
+    // Allow small tolerance window (50ms) for legitimate timing variance
+    if (skewMs < -50) { // Response timestamp is significantly before question
+      console.warn(
+        `[LLM Chatbot] Clock skew detected: response (${responseTs}) arrived ${Math.abs(skewMs)}ms before question (${questionTs})`
+      )
+      return { isValid: false, skewDetected: true, skewMs }
+    }
+
+    return { isValid: true, skewDetected: false, skewMs }
+  }
+
+  /**
+   * Stores responses that arrived before their questions for later matching.
+   * These will be retried when the question finally arrives.
+   */
+  private storeEarlyResponse(conversationKey: string, response: any): void {
+    if (!this.pendingResponsesByConversation.has(conversationKey)) {
+      this.pendingResponsesByConversation.set(conversationKey, [])
+    }
+    this.pendingResponsesByConversation.get(conversationKey)!.push({
+      response,
+      arrivedAtMs: Date.now(),
+    })
+    
+    console.warn(
+      `[LLM Chatbot] Response arrived before question (stored for later). Conversation: ${conversationKey}, source: ${response?.source}`
+    )
+  }
+
+  /**
+   * Checks if stored early responses are still within the timeout window.
+   * Returns responses ready for matching or logs if they're too old.
+   */
+  private getAndCleanEarlyResponses(conversationKey: string): any[] {
+    const stored = this.pendingResponsesByConversation.get(conversationKey)
+    if (!stored || stored.length === 0) {
+      return []
+    }
+
+    const now = Date.now()
+    const readyResponses: any[] = []
+
+    for (const entry of stored) {
+      const ageMs = now - entry.arrivedAtMs
+      if (ageMs <= this.EARLY_RESPONSE_TIMEOUT_MS) {
+        readyResponses.push(entry.response)
+      } else {
+        console.warn(
+          `[LLM Chatbot] Discarding early response - too old (${ageMs}ms > ${this.EARLY_RESPONSE_TIMEOUT_MS}ms). Conversation: ${conversationKey}`
+        )
+      }
+    }
+
+    // Remove all entries (either we're processing them or discarding expired ones)
+    this.pendingResponsesByConversation.delete(conversationKey)
+    return readyResponses
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars

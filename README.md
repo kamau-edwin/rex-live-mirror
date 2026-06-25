@@ -1,3 +1,5 @@
+> Copilot instructions are centralized at `/Users/etk243/extension_dev/workflow/.github/copilot_instructions.md` and this workspace links to that file via `.github/copilot_instructions.md`.
+
 # rex-live-mirror
 
 Module for capturing Q&A pairs, sources, and interactions from LLM chatbot platforms in real-time.
