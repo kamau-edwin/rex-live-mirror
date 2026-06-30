@@ -366,7 +366,7 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
     const now = Date.now()
     const conversationKeysToDelete: string[] = []
 
-    for (const [conversationKey, question] of this.pendingQuestionByConversation.entries()) {
+    for (const [conversationKey] of this.pendingQuestionByConversation.entries()) {
       const questionAddedTime = this.questionTimestamps.get(conversationKey)
       if (!questionAddedTime) {
         continue
