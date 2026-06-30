@@ -36,7 +36,7 @@
   },
   "dependencies": {
     "@bric/rex-core": "github:kamau-edwin/rex-core#main",
-    "@bric/rex-page-events": "file:../rex-page-events",
-    "@bric/rex-web-visits": "file:../rex-web-visits"
+    "@bric/rex-page-events": "github:kamau-edwin/rex-page-events#main",
+    "@bric/rex-web-visits": "github:kamau-edwin/rex-web-visits#main"
   }
 }
