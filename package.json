@@ -27,7 +27,7 @@
     "lint": "eslint src"
   },
   "devDependencies": {
-    "@eslint/js": "^10.0.1",
+    "@eslint/js": "^9.39.0",
     "@types/chrome": "^0.0.275",
     "eslint": "^9.39.0",
     "jiti": "^2.6.1",
@@ -35,6 +35,8 @@
     "typescript-eslint": "^8.13.0"
   },
   "dependencies": {
-    "@bric/rex-core": "github:kamau-edwin/rex-core#main"
+    "@bric/rex-core": "github:kamau-edwin/rex-core#main",
+    "@bric/rex-page-events": "file:../rex-page-events",
+    "@bric/rex-web-visits": "file:../rex-web-visits"
   }
 }

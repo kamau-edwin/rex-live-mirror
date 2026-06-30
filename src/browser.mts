@@ -1,4 +1,5 @@
 import { REXClientModule, registerREXModule } from '@bric/rex-core/browser'
+import { initializePageActionPipeline } from '@bric/rex-page-events/page-actions'
 import { PerplexityParser, type SourceExtractionResult } from './chatbots/perplexity.js'
 import { ChatGPTParser, type ChatGPTCompletionDecision } from './chatbots/chatgpt.js'
 import { GeminiParser } from './chatbots/gemini.js'
@@ -136,6 +137,8 @@ class LLMChatbotBrowserModule extends REXClientModule {
             console.log('[LLM Chatbot Browser] Module enabled')
             console.log('[LLM Chatbot Browser] Batch size:', this.batchSize)
             console.log('[LLM Chatbot Browser] Transmission interval:', this.transmissionInterval, 'ms')
+
+            initializePageActionPipeline()
 
             // Determine which chatbot we're on
             this.initializeChatbotCapture(llmConfig)

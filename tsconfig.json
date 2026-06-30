@@ -1,5 +1,10 @@
 {
   "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@bric/rex-web-visits": ["../rex-web-visits/src/index.mts"],
+      "@bric/rex-page-events": ["../rex-page-events/src/index.mts"]
+    },
     "module": "NodeNext",
     "target": "es5",
     "esModuleInterop": true,
