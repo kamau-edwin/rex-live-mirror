@@ -21,6 +21,8 @@ export interface GeminiSelectors {
   sourceDetailAnchors?: string
   sourceToggleButton?: string
   sourceCloseButton?: string
+  sourceMenuButton?: string
+  sourceMenuItem?: string
 }
 
 /**
@@ -282,7 +284,8 @@ export class GeminiParser {
 
     const panelOpen =
       !!document.querySelector('context-sidebar:not([aria-hidden="true"])') ||
-      !!document.querySelector('side-bar-sources:not([aria-hidden="true"])')
+      !!document.querySelector('side-bar-sources:not([aria-hidden="true"])') ||
+      this.isDialogOpen()
     if (panelOpen) {
       const configuredCloseSelector = this.resolveSelector('sourceCloseButton')
       const fallbackCloseSelectors = [
@@ -308,7 +311,7 @@ export class GeminiParser {
       if (closeButton) {
         closeButton.click()
       } else {
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+        this.closeTransientMenuOrDialog()
       }
     }
 
@@ -343,6 +346,14 @@ export class GeminiParser {
     return timestamp
   }
 
+  private isDialogOpen(): boolean {
+    return !!document.querySelector('[role="dialog"]:not([aria-hidden="true"])')
+  }
+
+  private closeTransientMenuOrDialog(): void {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  }
+
   private isCitationSourceButton(button: Element): boolean {
     const aria = (button.getAttribute('aria-label') || '').toLowerCase()
     const dataTestId = (button.getAttribute('data-test-id') || '').toLowerCase()
@@ -362,6 +373,55 @@ export class GeminiParser {
     }
 
     return false
+  }
+
+  private isMoreMenuButton(button: Element): boolean {
+    const aria = this.normalizeText(button.getAttribute('aria-label')).toLowerCase()
+    const dataTestId = this.normalizeText(button.getAttribute('data-test-id')).toLowerCase()
+
+    return dataTestId === 'more-menu-button' || aria === 'show more options' || aria === 'more'
+  }
+
+  private isViewSourcesMenuItem(element: Element): boolean {
+    const text = this.normalizeText(element.textContent).toLowerCase()
+    const aria = this.normalizeText(element.getAttribute('aria-label')).toLowerCase()
+    const dataTestId = this.normalizeText(element.getAttribute('data-test-id')).toLowerCase()
+
+    if (dataTestId.includes('view-source') || dataTestId.includes('view-sources')) {
+      return true
+    }
+
+    return text.includes('view sources') || text.includes('view source') || aria.includes('view sources')
+  }
+
+  private findViewSourcesMenuItem(): HTMLElement | null {
+    const configuredMenuItemSelector = this.resolveSelector('sourceMenuItem')
+    const fallbackSelectors = [
+      '[role="menuitem"]',
+      '[role="menu"] button',
+      '[role="menu"] [aria-label]',
+      'button[aria-label*="view source" i]',
+    ]
+
+    const selectors = configuredMenuItemSelector
+      ? [configuredMenuItemSelector, ...fallbackSelectors]
+      : fallbackSelectors
+
+    for (const selector of selectors) {
+      let candidates: Element[] = []
+      try {
+        candidates = Array.from(document.querySelectorAll(selector))
+      } catch {
+        continue
+      }
+
+      const matched = candidates.find((candidate) => this.isViewSourcesMenuItem(candidate))
+      if (matched instanceof HTMLElement) {
+        return matched
+      }
+    }
+
+    return null
   }
 
   private normalizeSelectorUnion(selector?: string): string | undefined {
@@ -631,51 +691,6 @@ export class GeminiParser {
       return undefined
     }
 
-    const maybeOpenSourcesPanel = (): boolean => {
-      const toggleSelector = this.resolveSelector('sourceToggleButton')
-      if (!toggleSelector) {
-        console.warn('[GeminiParser] Missing config selector: sourceToggleButton')
-        return false
-      }
-      // Only search within the current response container: a document-level
-      // fallback would pick up toggles from other turns and cause panel bleed.
-      const toggle = responseContainer.querySelector(toggleSelector) as HTMLElement | null
-      if (!toggle) {
-        console.warn(`[GeminiParser] Toggle button not found in response container: ${toggleSelector}`)
-        return false
-      }
-
-      const className = toggle.getAttribute('class') || ''
-      const alreadySelected = /\bselected\b/i.test(className)
-      const ariaExpanded = (toggle.getAttribute('aria-expanded') || '').toLowerCase() === 'true'
-
-      const panelOwnedByCurrentTurn =
-        !!currentResponseId && this.panelOpenedByParserForResponseId === currentResponseId
-
-      if (alreadySelected || ariaExpanded) {
-        if (panelOwnedByCurrentTurn) {
-          console.log('[GeminiParser] Sources panel already open for this response, skipping toggle click')
-          return false
-        }
-
-        // Panel is open for another turn or from stale state. Close it with a
-        // single click and clear ownership. Do NOT attempt to re-open here:
-        // a double-click risks landing in an ambiguous UI state (still-open wrong
-        // turn, or briefly closed/reopened out of order). The mutation triggered
-        // by the close will fire promoteReadyResponses again; on that next pass
-        // the panel will be confirmed closed and we can open it cleanly.
-        toggle.click()
-        this.panelOpenedByParserForResponseId = undefined
-        console.log('[GeminiParser] Sources panel was open for another turn; closed. Will reopen on next extraction pass.')
-        return false
-      }
-
-      // Open panel immediately so source detail anchors can be read for this turn.
-      toggle.click()
-      console.log('[GeminiParser] Clicked sources toggle to reveal source URLs')
-      return true
-    }
-
     const queryWithinLatestTurn = (selector: string): Element[] => {
       return Array.from(responseContainer.querySelectorAll(selector))
     }
@@ -715,11 +730,75 @@ export class GeminiParser {
       ? queryWithinLatestTurn(sourceToggleSelector).length > 0
       : false
 
+    const sourceMenuButtonSelector = this.resolveSelector('sourceMenuButton')
+    const latestTurnSourceMenuButtons = sourceMenuButtonSelector
+      ? queryWithinLatestTurn(sourceMenuButtonSelector).filter((button) => this.isMoreMenuButton(button))
+      : []
+
+    const maybeOpenSourcesPanel = (): { opened: boolean; attempted: boolean; noSources: boolean } => {
+      const panelOwnedByCurrentTurn =
+        !!currentResponseId && this.panelOpenedByParserForResponseId === currentResponseId
+
+      const clickTrigger = (toggle: HTMLElement, description: string): { opened: boolean; attempted: boolean; noSources: boolean } => {
+        const className = toggle.getAttribute('class') || ''
+        const alreadySelected = /\bselected\b/i.test(className)
+        const ariaExpanded = (toggle.getAttribute('aria-expanded') || '').toLowerCase() === 'true'
+
+        if (alreadySelected || ariaExpanded) {
+          if (panelOwnedByCurrentTurn) {
+            console.log(`[GeminiParser] ${description} already open for this response, skipping click`)
+            return { opened: false, attempted: true, noSources: false }
+          }
+
+          toggle.click()
+          this.panelOpenedByParserForResponseId = undefined
+          console.log(`[GeminiParser] ${description} was open for another turn; closed. Will reopen on next extraction pass.`)
+          return { opened: false, attempted: true, noSources: false }
+        }
+
+        toggle.click()
+        console.log(`[GeminiParser] Clicked ${description} to reveal source URLs`)
+        return { opened: true, attempted: true, noSources: false }
+      }
+
+      const inlineCitationTrigger = latestTurnCitationButtons.find((button): button is HTMLElement => button instanceof HTMLElement)
+      if (inlineCitationTrigger) {
+        return clickTrigger(inlineCitationTrigger, 'inline citation button')
+      }
+
+      const sourceToggle = sourceToggleSelector
+        ? queryWithinLatestTurn(sourceToggleSelector).find((button): button is HTMLElement => button instanceof HTMLElement)
+        : undefined
+      if (sourceToggle) {
+        return clickTrigger(sourceToggle, 'sources toggle')
+      }
+
+      const menuButton = latestTurnSourceMenuButtons.find((button): button is HTMLElement => button instanceof HTMLElement)
+      if (!menuButton) {
+        return { opened: false, attempted: false, noSources: false }
+      }
+
+      menuButton.click()
+      console.log('[GeminiParser] Clicked More menu button while probing for View sources')
+
+      const viewSourcesItem = this.findViewSourcesMenuItem()
+      if (!viewSourcesItem) {
+        this.closeTransientMenuOrDialog()
+        console.log('[GeminiParser] More menu did not expose View sources for this turn')
+        return { opened: false, attempted: true, noSources: true }
+      }
+
+      viewSourcesItem.click()
+      console.log('[GeminiParser] Clicked View sources from More menu')
+      return { opened: true, attempted: true, noSources: false }
+    }
+
     // If latest turn has no source affordance at all, do not read side panel anchors (which can be stale).
     const hasSourceAffordanceInLatestTurn =
       latestTurnSourceAnchors.length > 0 ||
       latestTurnCitationButtons.length > 0 ||
-      hasFooterSourceToggleInLatestTurn
+      hasFooterSourceToggleInLatestTurn ||
+      latestTurnSourceMenuButtons.length > 0
     if (!hasSourceAffordanceInLatestTurn) {
       if (currentResponseId) { this.extractedResponseIds.add(currentResponseId) }
       console.log('[GeminiParser] Latest response has no source affordance; returning empty sources for this turn')
@@ -744,10 +823,15 @@ export class GeminiParser {
     }
 
     let openedByParser = false
+    let revealAttempted = false
+    let menuReportedNoSources = false
     if (sourceDetailAnchors.length === 0) {
       // Attempt to open the sources panel for this turn when detail anchors are not yet visible.
       console.log('[GeminiParser] No detail anchors found, checking for source button')
-      openedByParser = maybeOpenSourcesPanel()
+      const revealResult = maybeOpenSourcesPanel()
+      openedByParser = revealResult.opened
+      revealAttempted = revealResult.attempted
+      menuReportedNoSources = revealResult.noSources
       
       if (openedByParser && currentResponseId) {
         this.panelOpenedByParserForResponseId = currentResponseId
@@ -895,7 +979,8 @@ export class GeminiParser {
     const closeSourcesPanelIfOpen = (): void => {
       const panelOpen =
         !!document.querySelector('context-sidebar:not([aria-hidden="true"])') ||
-        !!document.querySelector('side-bar-sources:not([aria-hidden="true"])')
+        !!document.querySelector('side-bar-sources:not([aria-hidden="true"])') ||
+        this.isDialogOpen()
       if (!panelOpen) {
         return
       }
@@ -928,7 +1013,7 @@ export class GeminiParser {
       }
 
       // Fallback for UI variants where explicit close button selector changed.
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      this.closeTransientMenuOrDialog()
       console.log('[GeminiParser] Attempted to close sources panel via Escape fallback')
     }
 
@@ -982,15 +1067,20 @@ export class GeminiParser {
         citationCandidateCount === 0 &&
         sourceDetailAnchors.length === 0 &&
         latestTurnSourceAnchors.length === 0 &&
-        !hasFooterSourceToggleInLatestTurn
+        !hasFooterSourceToggleInLatestTurn &&
+        !revealAttempted
       ) {
         return finalizeEmptySources('[GeminiParser] No source citations detected for this turn - finalizing with empty sources')
+      }
+
+      if (menuReportedNoSources && sourceDetailAnchors.length === 0) {
+        return finalizeEmptySources('[GeminiParser] More menu exposed no View sources action for this turn - finalizing with empty sources')
       }
 
       // If citation affordances or a sources toggle exist for this turn, do not finalize
       // with an empty payload. Keep waiting until real source detail data is extracted.
       if (
-        (citationCandidateCount > 0 || hasFooterSourceToggleInLatestTurn) &&
+        (citationCandidateCount > 0 || hasFooterSourceToggleInLatestTurn || latestTurnSourceMenuButtons.length > 0) &&
         sourceDetailAnchors.length === 0
       ) {
         console.log('[GeminiParser] Citation affordance present but no source detail links captured yet - waiting for next mutation')
