@@ -154,6 +154,38 @@ class LLMChatbotBrowserModule extends REXClientModule {
     })
   }
 
+  private normalizeStringArray(input: unknown): string[] {
+    if (!Array.isArray(input)) {
+      return []
+    }
+
+    return input
+      .map((value) => (typeof value === 'string' ? value.trim().toLowerCase() : ''))
+      .filter((value) => value.length > 0)
+  }
+
+  private isPlatformEnabled(platformConfig: any): boolean { // eslint-disable-line @typescript-eslint/no-explicit-any
+    if (typeof platformConfig?.enabled === 'boolean') {
+      return platformConfig.enabled
+    }
+
+    return true
+  }
+
+  private getConfiguredHosts(platformConfig: any, defaults: string[]): string[] { // eslint-disable-line @typescript-eslint/no-explicit-any
+    const configuredHosts = this.normalizeStringArray(platformConfig?.hosts)
+    if (configuredHosts.length > 0) {
+      return configuredHosts
+    }
+
+    return defaults.map((host) => host.trim().toLowerCase()).filter(Boolean)
+  }
+
+  private hostMatchesConfiguredHosts(host: string, allowedHosts: string[]): boolean {
+    const normalizedHost = host.trim().toLowerCase()
+    return allowedHosts.includes(normalizedHost)
+  }
+
   private initializeChatbotCapture(llmConfig: any): void {
     const currentURL = window.location.href
     const currentLocation = new URL(currentURL)
@@ -173,24 +205,47 @@ class LLMChatbotBrowserModule extends REXClientModule {
 
     // Get platform-specific configs
     const platforms = llmConfig.platforms || {}
-    const geminiCaptureEligible = this.isGeminiCaptureEligiblePath(path)
+    const perplexityConfig = platforms.perplexity || {}
+    const chatgptConfig = platforms.chatgpt || {}
+    const geminiConfig = platforms.gemini || {}
+    const claudeConfig = platforms.claude || {}
+
+    const perplexityHosts = this.getConfiguredHosts(perplexityConfig, ['www.perplexity.ai', 'perplexity.ai'])
+    const chatgptHosts = this.getConfiguredHosts(chatgptConfig, ['chatgpt.com'])
+    const geminiHosts = this.getConfiguredHosts(geminiConfig, ['gemini.google.com'])
+    const claudeHosts = this.getConfiguredHosts(claudeConfig, ['claude.ai'])
+
+    const geminiCaptureEligible = this.isGeminiCaptureEligiblePath(path, geminiConfig)
 
     // Match current page to chatbot source (only if source is enabled)
     try {
-      if (enabledSources.includes('perplexity') && host === 'www.perplexity.ai') {
-        const perplexityConfig = platforms.perplexity || {}
+      if (
+        enabledSources.includes('perplexity') &&
+        this.isPlatformEnabled(perplexityConfig) &&
+        this.hostMatchesConfiguredHosts(host, perplexityHosts)
+      ) {
         this.parser = new PerplexityParser(perplexityConfig)
         console.log('[LLM Chatbot Browser] Perplexity parser initialized with config')
-      } else if (enabledSources.includes('chatgpt') && host === 'chatgpt.com') {
-        const chatgptConfig = platforms.chatgpt || {}
+      } else if (
+        enabledSources.includes('chatgpt') &&
+        this.isPlatformEnabled(chatgptConfig) &&
+        this.hostMatchesConfiguredHosts(host, chatgptHosts)
+      ) {
         this.parser = new ChatGPTParser(chatgptConfig)
         console.log('[LLM Chatbot Browser] ChatGPT parser initialized with config')
-      } else if (enabledSources.includes('gemini') && host === 'gemini.google.com' && geminiCaptureEligible) {
-        const geminiConfig = platforms.gemini || {}
+      } else if (
+        enabledSources.includes('gemini') &&
+        this.isPlatformEnabled(geminiConfig) &&
+        this.hostMatchesConfiguredHosts(host, geminiHosts) &&
+        geminiCaptureEligible
+      ) {
         this.parser = new GeminiParser(geminiConfig)
         console.log('[LLM Chatbot Browser] Gemini parser initialized with config')
-      } else if (enabledSources.includes('claude') && host === 'claude.ai') {
-        const claudeConfig = platforms.claude || {}
+      } else if (
+        enabledSources.includes('claude') &&
+        this.isPlatformEnabled(claudeConfig) &&
+        this.hostMatchesConfiguredHosts(host, claudeHosts)
+      ) {
         this.parser = new ClaudeParser(claudeConfig)
         console.log('[LLM Chatbot Browser] Claude parser initialized with config')
       } else {
@@ -217,22 +272,40 @@ class LLMChatbotBrowserModule extends REXClientModule {
     }
   }
 
-  private isGeminiCaptureEligiblePath(path: string): boolean {
+  private isGeminiCaptureEligiblePath(path: string, geminiConfig?: any): boolean { // eslint-disable-line @typescript-eslint/no-explicit-any
     if (!path || path === '/') {
       return true
     }
 
-    const deniedPrefixes = [
-      '/updates',
-      '/about',
-      '/privacy',
-      '/terms',
-      '/policies',
-      '/intl',
-      '/auth',
-      '/signin',
-      '/login',
-    ]
+    const allowedPrefixes = this.normalizeStringArray(geminiConfig?.path_allowed_prefixes)
+    if (allowedPrefixes.length > 0) {
+      const isAllowed = allowedPrefixes.some((prefix) => {
+        if (prefix === '/') {
+          return true
+        }
+        const normalizedPrefix = prefix.endsWith('/') ? prefix.slice(0, -1) : prefix
+        return path === normalizedPrefix || path.startsWith(normalizedPrefix + '/')
+      })
+
+      if (!isAllowed) {
+        return false
+      }
+    }
+
+    const configuredDeniedPrefixes = this.normalizeStringArray(geminiConfig?.path_denied_prefixes)
+    const deniedPrefixes = configuredDeniedPrefixes.length > 0
+      ? configuredDeniedPrefixes
+      : [
+        '/updates',
+        '/about',
+        '/privacy',
+        '/terms',
+        '/policies',
+        '/intl',
+        '/auth',
+        '/signin',
+        '/login',
+      ]
 
     return !deniedPrefixes.some((prefix) => path === prefix || path.startsWith(prefix + '/'))
   }
