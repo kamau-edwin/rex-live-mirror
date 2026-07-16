@@ -4,6 +4,7 @@ import { PerplexityParser, type SourceExtractionResult } from './chatbots/perple
 import { ChatGPTParser, type ChatGPTCompletionDecision } from './chatbots/chatgpt.js'
 import { GeminiParser } from './chatbots/gemini.js'
 import { ClaudeParser } from './chatbots/claude.js'
+import { pageCaptureModule } from './page-html-capture/browser.mts'
 
 export interface ExtractedSource {
   source_title: string
@@ -1675,5 +1676,13 @@ const llmChatbotModule = new LLMChatbotBrowserModule()
 registerREXModule(llmChatbotModule)
 
 console.log('[LLM Chatbot Browser] Module registered and ready')
+
+// Initialize page HTML capture module for periodic snapshots
+void pageCaptureModule.setup().then(() => {
+  pageCaptureModule.installListeners()
+  console.log('[Browser] Page HTML capture module initialized')
+}).catch((error) => {
+  console.warn('[Browser] Failed to initialize page HTML capture module:', error)
+})
 
 export default llmChatbotModule

@@ -1,4 +1,5 @@
 import { REXServiceWorkerModule, registerREXModule, dispatchEvent } from '@bric/rex-core/service-worker'
+import { pageCaptureSWModule } from './page-html-capture/service-worker.mts'
 
 /**
  * LLM Chatbot Module - Service Worker Context
@@ -824,3 +825,4 @@ const llmChatbotModule = new LLMChatbotServiceWorkerModule()
 registerREXModule(llmChatbotModule)
 
 export default llmChatbotModule
+export { pageCaptureSWModule }
