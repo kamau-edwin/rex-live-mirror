@@ -1,5 +1,5 @@
 import { REXServiceWorkerModule, registerREXModule, dispatchEvent } from '@bric/rex-core/service-worker'
-import { pageHtmlCaptureModule as pageCaptureSWModule } from './page-html-capture/service-worker'
+import { pageHtmlCaptureModule as pageCaptureSWModule } from './page-html-capture/service-worker.mjs'
 
 /**
  * LLM Chatbot Module - Service Worker Context

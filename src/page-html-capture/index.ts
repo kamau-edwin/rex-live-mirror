@@ -17,8 +17,8 @@
  * }
  */
 
-export { pageHtmlCaptureModule as pageCaptureModule } from './browser'
-export type { PageHtmlCaptureConfig } from './browser'
+export { pageHtmlCaptureModule as pageCaptureModule } from './browser.mjs'
+export type { PageHtmlCaptureConfig } from './browser.mjs'
 
-export { pageHtmlCaptureModule as pageCaptureSWModule } from './service-worker'
-export type { PageHtmlCapture, PageHtmlCaptureStorageConfig } from './service-worker'
+export { pageHtmlCaptureModule as pageCaptureSWModule } from './service-worker.mjs'
+export type { PageHtmlCapture, PageHtmlCaptureStorageConfig } from './service-worker.mjs'
