@@ -252,13 +252,12 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
     return null
   }
 
-  override dispose(): void {
+  dispose(): void {
     if (this.cleanupIntervalId !== null) {
       clearInterval(this.cleanupIntervalId)
     }
     this.capturesByUrl.clear()
     this.capturesByCorrelationId.clear()
-    super.dispose()
   }
 }
 

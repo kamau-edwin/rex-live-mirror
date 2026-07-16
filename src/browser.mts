@@ -4,7 +4,7 @@ import { PerplexityParser, type SourceExtractionResult } from './chatbots/perple
 import { ChatGPTParser, type ChatGPTCompletionDecision } from './chatbots/chatgpt.js'
 import { GeminiParser } from './chatbots/gemini.js'
 import { ClaudeParser } from './chatbots/claude.js'
-import { pageCaptureModule } from './page-html-capture/browser.mts'
+import { pageHtmlCaptureModule as pageCaptureModule } from './page-html-capture/browser'
 
 export interface ExtractedSource {
   source_title: string
