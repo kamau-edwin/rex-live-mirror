@@ -165,6 +165,16 @@ class LLMChatbotBrowserModule extends REXClientModule {
       .filter((value) => value.length > 0)
   }
 
+  private coerceBoolean(value: unknown): boolean {
+    if (typeof value === 'boolean') {
+      return value
+    }
+    if (typeof value === 'string') {
+      return value.trim().toLowerCase() === 'true'
+    }
+    return Boolean(value)
+  }
+
   private isPlatformEnabled(platformConfig: any): boolean { // eslint-disable-line @typescript-eslint/no-explicit-any
     if (typeof platformConfig?.enabled === 'boolean') {
       return platformConfig.enabled
