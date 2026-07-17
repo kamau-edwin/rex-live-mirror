@@ -646,19 +646,45 @@ export class PerplexityParser {
       })
     }
 
-    // Find all assistant responses using config selector
+    // Find all assistant responses using config selector.
+    // Perplexity frequently leaves behind empty markdown-content placeholders
+    // while rendering actual content under data-renderer="lm" nodes.
     const assistantSelector = this.resolveSelector('assistantResponse')
+    const seenResponses = new Set<string>()
+
+    const appendResponse = (raw: string) => {
+      const content = this.normalizeText(raw)
+      if (!content || seenResponses.has(content)) {
+        return
+      }
+
+      seenResponses.add(content)
+      interactions.push({
+        type: 'response',
+        content,
+      })
+    }
+
     if (assistantSelector) {
       const botResponses = document.querySelectorAll(assistantSelector)
       console.log(`[PerplexityParser] Found ${botResponses.length} assistant response elements`)
       botResponses.forEach((msg) => {
-        const content = this.normalizeText(msg.textContent)
-        if (content) {
-          interactions.push({
-            type: 'response',
-            content,
-          })
-        }
+        appendResponse(msg.textContent ?? '')
+      })
+    }
+
+    if (seenResponses.size === 0) {
+      const fallbackResponseSelectors = [
+        'div[data-renderer="lm"]',
+        '.prose[data-renderer="lm"]',
+        '.prose[data-renderer]'
+      ]
+
+      const fallbackResponses = document.querySelectorAll(fallbackResponseSelectors.join(', '))
+      console.log(`[PerplexityParser] Fallback response probe found ${fallbackResponses.length} elements`)
+
+      fallbackResponses.forEach((node) => {
+        appendResponse(node.textContent ?? '')
       })
     }
 
