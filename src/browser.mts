@@ -278,6 +278,10 @@ class LLMChatbotBrowserModule extends REXClientModule {
       return true
     }
 
+    if (!this.coerceBoolean(geminiConfig?.path_filters_enabled)) {
+      return true
+    }
+
     const allowedPrefixes = this.normalizeStringArray(geminiConfig?.path_allowed_prefixes)
     if (allowedPrefixes.length > 0) {
       const isAllowed = allowedPrefixes.some((prefix) => {
