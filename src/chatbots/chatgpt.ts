@@ -21,6 +21,10 @@ export interface ChatGPTSelectors {
   citationElements: string
 }
 
+export type ChatGPTSelectorFallbacks = Partial<Record<keyof ChatGPTSelectors, string[]>>
+
+export type ChatGPTFallbackMode = 'append' | 'replace' | 'none'
+
 export interface ExtractedSource {
   source_title: string
   source_url?: string
@@ -29,6 +33,8 @@ export interface ExtractedSource {
 export interface ChatGPTConfig {
   enabled?: boolean
   selectors?: ChatGPTSelectors
+  fallback_mode?: ChatGPTFallbackMode
+  selector_fallbacks?: ChatGPTSelectorFallbacks
 }
 
 export interface ChatGPTCompletionDecision {
@@ -48,12 +54,16 @@ export interface ChatGPTCompletionDecision {
 export class ChatGPTParser {
   name = 'chatgpt'
   selectors: ChatGPTSelectors
+  private fallbackMode: ChatGPTFallbackMode
+  private selectorFallbacks: ChatGPTSelectorFallbacks
   private lastResponseSnapshot = ''
   private stableResponseChecks = 0
   private selectorValidationError: string | null = null
 
   constructor(config?: ChatGPTConfig) {
     this.selectors = config?.selectors as ChatGPTSelectors || ({} as ChatGPTSelectors)
+    this.fallbackMode = config?.fallback_mode || 'append'
+    this.selectorFallbacks = config?.selector_fallbacks || {}
     
     // STRICT MODE: Validate all required selectors are present
     const required: (keyof ChatGPTSelectors)[] = [
@@ -69,14 +79,78 @@ export class ChatGPTParser {
       'citationElements'
     ]
     
-    const missing = required.filter(key => !this.selectors[key])
+    const missing = required.filter((key) => {
+      const primary = this.selectors[key]
+      const fallbacks = this.selectorFallbacks[key] || []
+      return !primary && fallbacks.filter(Boolean).length === 0
+    })
     if (missing.length > 0) {
       this.selectorValidationError = `Missing required selectors: ${missing.join(', ')}`
       console.error(`[ChatGPTParser] ${this.selectorValidationError}`)
       this.reportConfigValidationFailure(this.selectorValidationError)
     }
     
-    console.log('[ChatGPTParser] Initialized with config selectors (strict mode - no fallbacks)', this.selectors)
+    console.log('[ChatGPTParser] Initialized with config selectors and fallback settings', {
+      selectors: this.selectors,
+      fallback_mode: this.fallbackMode,
+      selector_fallbacks: this.selectorFallbacks,
+    })
+  }
+
+  private normalizeSelectorUnion(selector?: string): string | undefined {
+    if (!selector) {
+      return undefined
+    }
+
+    const uniqueParts: string[] = []
+    const seen = new Set<string>()
+    for (const rawPart of selector.split(',')) {
+      const part = rawPart.trim()
+      if (!part || seen.has(part)) {
+        continue
+      }
+      seen.add(part)
+      uniqueParts.push(part)
+    }
+
+    return uniqueParts.length > 0 ? uniqueParts.join(', ') : undefined
+  }
+
+  private resolveSelector<K extends keyof ChatGPTSelectors>(key: K): string | undefined {
+    const primary = this.normalizeSelectorUnion(this.selectors[key])
+    const fallbacks = (this.selectorFallbacks[key] || []).map((s) => s.trim()).filter(Boolean)
+
+    if (this.fallbackMode === 'none') {
+      return primary || undefined
+    }
+
+    if (this.fallbackMode === 'append') {
+      const selectorGroups = Array.from(new Set([primary, ...fallbacks].filter(Boolean) as string[]))
+      const parts = selectorGroups.reduce<string[]>((acc, selector) => {
+        const normalized = selector
+          .split(',')
+          .map((part) => part.trim())
+          .filter(Boolean)
+        acc.push(...normalized)
+        return acc
+      }, [])
+      const uniqueParts = Array.from(new Set(parts))
+      return uniqueParts.length > 0 ? uniqueParts.join(', ') : undefined
+    }
+
+    // replace mode: choose first selector that currently matches DOM
+    const candidates = [primary, ...fallbacks].filter(Boolean) as string[]
+    for (const selector of candidates) {
+      try {
+        if (document.querySelector(selector)) {
+          return selector
+        }
+      } catch {
+        // Ignore invalid selectors and try next candidate.
+      }
+    }
+
+    return primary || fallbacks[0]
   }
 
   private reportConfigValidationFailure(error: string): void {
@@ -104,10 +178,13 @@ export class ChatGPTParser {
     }
 
     const interactions: ParsedInteraction[] = []
-    const assistantContentSelector = this.selectors.assistantContent
+    const userMessageSelector = this.resolveSelector('userMessage')
+    const assistantMessageSelector = this.resolveSelector('assistantMessage')
+    const assistantContentSelector = this.resolveSelector('assistantContent')
+    const conversationTurnSelector = this.resolveSelector('conversationTurnFallback')
 
-    if (this.selectors.userMessage) {
-      const userMessages = document.querySelectorAll(this.selectors.userMessage)
+    if (userMessageSelector) {
+      const userMessages = document.querySelectorAll(userMessageSelector)
       console.log(`[ChatGPTParser] Found ${userMessages.length} user message elements`)
       userMessages.forEach((msg) => {
         const content = msg.textContent?.trim()
@@ -120,12 +197,12 @@ export class ChatGPTParser {
       })
     }
 
-    if (this.selectors.assistantMessage) {
-      const assistantMessageContainers = document.querySelectorAll(this.selectors.assistantMessage)
+    if (assistantMessageSelector) {
+      const assistantMessageContainers = document.querySelectorAll(assistantMessageSelector)
       console.log(`[ChatGPTParser] Found ${assistantMessageContainers.length} assistant message elements`)
 
       assistantMessageContainers.forEach((container) => {
-        const proseElement = container.querySelector(assistantContentSelector)
+        const proseElement = assistantContentSelector ? container.querySelector(assistantContentSelector) : null
         const content = proseElement?.textContent?.trim() || container.textContent?.trim() || null
 
         if (content && content.length > 0) {
@@ -137,9 +214,9 @@ export class ChatGPTParser {
       })
     }
 
-    if (interactions.length === 0) {
-      console.log(`[ChatGPTParser] No messages found with primary selectors, trying fallback ${this.selectors.conversationTurnFallback}`)
-      const messageGroups = document.querySelectorAll(this.selectors.conversationTurnFallback)
+    if (interactions.length === 0 && conversationTurnSelector) {
+      console.log(`[ChatGPTParser] No messages found with primary selectors, trying fallback ${conversationTurnSelector}`)
+      const messageGroups = document.querySelectorAll(conversationTurnSelector)
       console.log(`[ChatGPTParser] Found ${messageGroups.length} conversation-turn elements`)
       messageGroups.forEach((group) => {
         const textContent = group.textContent?.trim()
@@ -165,20 +242,28 @@ export class ChatGPTParser {
       }
     }
 
-    const stopGeneratingSelector = this.selectors.stopGeneratingButton
-    const assistantSelector = this.selectors.assistantMessage
-    const assistantContentSelector = this.selectors.assistantContent
-    const writingBlockSelector = this.selectors.writingBlock
-    const streamActiveSelector = this.selectors.streamActive
-    const assistantTurnSelector = this.selectors.assistantTurnContainer
-    const copyResponseSelector = this.selectors.copyResponseButton
+    const stopGeneratingSelector = this.resolveSelector('stopGeneratingButton')
+    const assistantSelector = this.resolveSelector('assistantMessage')
+    const assistantContentSelector = this.resolveSelector('assistantContent')
+    const writingBlockSelector = this.resolveSelector('writingBlock')
+    const streamActiveSelector = this.resolveSelector('streamActive')
+    const assistantTurnSelector = this.resolveSelector('assistantTurnContainer')
+    const copyResponseSelector = this.resolveSelector('copyResponseButton')
+
+    if (!assistantSelector || !assistantContentSelector || !assistantTurnSelector || !copyResponseSelector) {
+      return {
+        completed: false,
+        reason: 'selector_validation_failed',
+        shouldRecheck: false,
+      }
+    }
 
     const getLastMatchedElement = (selector: string): Element | null => {
       const matches = document.querySelectorAll(selector)
       return matches.length > 0 ? matches[matches.length - 1] : null
     }
 
-    if (document.querySelector(stopGeneratingSelector)) {
+    if (stopGeneratingSelector && document.querySelector(stopGeneratingSelector)) {
       console.log('[ChatGPTParser] Response still streaming - stop generating button detected')
       return {
         completed: false,
@@ -197,7 +282,7 @@ export class ChatGPTParser {
       }
     }
 
-    if (document.querySelector(writingBlockSelector)) {
+    if (writingBlockSelector && document.querySelector(writingBlockSelector)) {
       console.log('[ChatGPTParser] Response still streaming - writing block detected')
       return {
         completed: false,
@@ -206,7 +291,7 @@ export class ChatGPTParser {
       }
     }
 
-    if (document.querySelector(streamActiveSelector)) {
+    if (streamActiveSelector && document.querySelector(streamActiveSelector)) {
       console.log('[ChatGPTParser] Response still streaming - stream active marker detected')
       return {
         completed: false,
@@ -217,7 +302,7 @@ export class ChatGPTParser {
 
     const latestMarkdown = latestAssistantMsg?.querySelector(assistantContentSelector)
     const latestContent = (latestMarkdown?.textContent || latestAssistantMsg?.textContent || '').trim()
-    const latestAssistantTurn = document.querySelector(assistantTurnSelector)
+    const latestAssistantTurn = getLastMatchedElement(assistantTurnSelector)
     const hasCopyResponseButton = !!latestAssistantTurn?.querySelector(copyResponseSelector)
 
     if (!latestContent) {
@@ -357,7 +442,10 @@ export class ChatGPTParser {
       return !skipPatterns.some((pattern) => pattern.test(title))
     }
 
-    const linkSelector = this.selectors.citationElements
+    const linkSelector = this.resolveSelector('citationElements')
+    if (!linkSelector) {
+      return []
+    }
     const linkElements = document.querySelectorAll(linkSelector)
 
     linkElements.forEach((element) => {
@@ -384,9 +472,10 @@ export class ChatGPTParser {
       sources.push({ source_title: title, source_url: url })
     })
 
-    const assistantMessages = document.querySelectorAll(
-      this.selectors.assistantMessage,
-    )
+    const assistantSelector = this.resolveSelector('assistantMessage')
+    const assistantMessages: Element[] = assistantSelector
+      ? Array.from(document.querySelectorAll(assistantSelector))
+      : []
     const urlRegex = /https?:\/\/[^\s<>"{}|\\^`[\]]+/g
 
     assistantMessages.forEach((msg) => {
