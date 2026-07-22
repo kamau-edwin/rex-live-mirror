@@ -72,6 +72,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
   private captureIntervalId: NodeJS.Timeout | null = null
   private captureSequence: number = 0
   private interactionCorrelationId: string | null = null // Link captures to interactions
+  private interactionCorrelationSetAtMs: number = 0
   private lastCaptureTimestamp: number = 0
   private lastUserActivityAt: number = Date.now()
   private isSourceCaptureLocked: boolean = false
@@ -80,6 +81,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
   private lastDispatchedQaFingerprint: Map<string, string> = new Map() // Track sent QA snapshots to avoid duplicates
   private readonly MIN_CAPTURE_INTERVAL_MS = 5000 // Don't capture faster than 5 seconds
   private readonly MAX_CAPTURES_PER_SESSION = 1000 // Memory safety
+  private readonly MAX_CORRELATION_AGE_MS = 30000 // Prevent stale join keys from leaking across turns
 
   constructor() {
     super()
@@ -278,6 +280,18 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
     return created
   }
 
+  private getActiveCorrelationId(referenceTimestampMs: number): string | null {
+    if (!this.interactionCorrelationId) {
+      return null
+    }
+
+    if ((referenceTimestampMs - this.interactionCorrelationSetAtMs) > this.MAX_CORRELATION_AGE_MS) {
+      return null
+    }
+
+    return this.interactionCorrelationId
+  }
+
   private updateSourceStability(platform: string, captureType: 'qa' | 'full_page', pageHtml: string): void {
     if (captureType !== 'qa') {
       return
@@ -387,7 +401,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
         captureType,
         pageHtmlLength: pageHtml.length,
         pageHtml,
-        correlationId: this.interactionCorrelationId,
+        correlationId: this.getActiveCorrelationId(now),
       }
 
       // Send to service worker
@@ -531,7 +545,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
           captureType: 'sources',
           pageHtmlLength: pageHtml.length,
           pageHtml,
-          correlationId: this.interactionCorrelationId,
+          correlationId: this.getActiveCorrelationId(now),
         }
 
         await chrome.runtime.sendMessage({
@@ -611,6 +625,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
    */
   setCorrelationId(correlationId: string | null): void {
     this.interactionCorrelationId = correlationId
+    this.interactionCorrelationSetAtMs = Date.now()
     console.log('[Page HTML Capture] Correlation ID set:', correlationId)
   }
 

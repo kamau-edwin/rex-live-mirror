@@ -76,7 +76,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
   private localSessionId: string | undefined = undefined  // Self-generated ID for logged-out sessions
   private hadMessagesInDOM: boolean = false  // Track if we previously had messages (for new conversation detection)
   private emptyDomSinceMs: number | null = null
-  private readonly EMPTY_DOM_RESET_GRACE_MS = 2000
+  private readonly EMPTY_DOM_RESET_GRACE_MS = 8000
   private lastSelectorDiagnosticFingerprint: string = ''
   private responseContainerKeys = new Map<Element, string>()
   private responseContainerKeySequence = 0
