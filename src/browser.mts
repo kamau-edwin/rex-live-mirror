@@ -85,7 +85,8 @@ class LLMChatbotBrowserModule extends REXClientModule {
   private readonly MAX_COMPLETION_RECHECK_ATTEMPTS = 3
   private readonly COMPLETION_RECHECK_DELAY_MS = 300
   private processInFlight: boolean = false
-  private processQueued: boolean = false
+  private processQueuedCount: number = 0
+  private readonly MAX_QUEUED_PROCESS_RUNS = 5
 
   // Browser-side persistence checkpoint — prevents re-capture of already-sent prompts across page reloads.
   private captureCheckpointMaxQts: number = 0                  // max question_timestamp seen
@@ -916,7 +917,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
 
   private async processPage(): Promise<void> {
     if (this.processInFlight) {
-      this.processQueued = true
+      this.processQueuedCount = Math.min(this.processQueuedCount + 1, this.MAX_QUEUED_PROCESS_RUNS)
       return
     }
 
@@ -1398,8 +1399,8 @@ class LLMChatbotBrowserModule extends REXClientModule {
       console.error('[LLM Chatbot Browser] Error processing page:', error)
     } finally {
       this.processInFlight = false
-      if (this.processQueued) {
-        this.processQueued = false
+      if (this.processQueuedCount > 0) {
+        this.processQueuedCount -= 1
         setTimeout(() => {
           void this.processPage().catch((error) => {
             console.error('[LLM Chatbot Browser] Error in queued page processing:', error)
@@ -1663,9 +1664,9 @@ class LLMChatbotBrowserModule extends REXClientModule {
 
       // Get batch to transmit (respect batch size)
       const batch = finalizedInteractions.slice(0, this.batchSize)
-      // Put any overflow back into the queue (at the front, since they're ready)
+      // Preserve queue ordering: keep existing pending items ahead of ready overflow.
       if (finalizedInteractions.length > this.batchSize) {
-        this.interactions = [...finalizedInteractions.slice(this.batchSize), ...this.interactions]
+        this.interactions = [...this.interactions, ...finalizedInteractions.slice(this.batchSize)]
       }
 
       for (const interaction of batch) {
