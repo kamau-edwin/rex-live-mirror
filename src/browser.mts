@@ -1266,6 +1266,9 @@ class LLMChatbotBrowserModule extends REXClientModule {
             source_extraction: interaction.type === 'response' ? sourceExtractionState : undefined,
           }
           if (newInteraction.type === 'response') {
+            pageCaptureModule.setCorrelationId(newId)
+          }
+          if (newInteraction.type === 'response') {
             console.log(`[LLM Chatbot Browser] Response update created with ${newInteraction.sources?.length || 0} sources`)
           }
 
@@ -1300,6 +1303,9 @@ class LLMChatbotBrowserModule extends REXClientModule {
             turn_number: nextTurnNumber,
             sources: interaction.type === 'response' ? extractedSources : [],
             source_extraction: interaction.type === 'response' ? sourceExtractionState : undefined,
+          }
+          if (newInteraction.type === 'response') {
+            pageCaptureModule.setCorrelationId(newId)
           }
           if (newInteraction.type === 'response') {
             console.log(`[LLM Chatbot Browser] Response created with ${newInteraction.sources?.length || 0} sources`)
