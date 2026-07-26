@@ -394,6 +394,18 @@ export class PerplexityParser {
     return ((matched || candidates[0]) as HTMLElement | undefined) || null
   }
 
+  private getSourceToggleGlobal(): HTMLElement | null {
+    const toggleSelector = this.resolveSelector('sourceToggleButton')
+    if (!toggleSelector) {
+      return null
+    }
+    // Searches document-level (not scoped to a turn container) for controls like
+    // the Perplexity "Links" header tab that lives outside response containers.
+    const candidates = Array.from(document.querySelectorAll(toggleSelector))
+    const matched = candidates.find((candidate) => this.isSourcesToggleButton(candidate))
+    return ((matched || candidates[0]) as HTMLElement | undefined) || null
+  }
+
   private getVisibleSourceCountSignal(sourceToggle: HTMLElement | null): number {
     if (!sourceToggle) {
       return 0
@@ -918,7 +930,16 @@ export class PerplexityParser {
     try {
       const maxAttempts = 2
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        const sourceToggle = this.getSourceToggleInContainer(responseContainer)
+        let sourceToggle = this.getSourceToggleInContainer(responseContainer)
+        if (!sourceToggle) {
+          // Fallback to document-level toggle (e.g. the Perplexity "Links" header tab
+          // that appears above response containers rather than inside them).
+          const globalToggle = this.getSourceToggleGlobal()
+          if (globalToggle) {
+            console.log('[PerplexityParser] Turn-scoped toggle not found; falling back to document-level toggle (header Links tab)')
+            sourceToggle = globalToggle
+          }
+        }
         if (!sourceToggle) {
           if (attempt < maxAttempts) {
             continue

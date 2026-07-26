@@ -1083,6 +1083,32 @@ export class GeminiParser {
         (citationCandidateCount > 0 || hasFooterSourceToggleInLatestTurn || latestTurnSourceMenuButtons.length > 0) &&
         sourceDetailAnchors.length === 0
       ) {
+        // Exception: if the panel was already opened by a previous call (panelOwnedByCurrentTurn)
+        // but detail anchors still haven't appeared on retry (revealAttempted=true, panel already
+        // selected so openedByParser=false), collect chip metadata as partial sources to avoid
+        // holding the interaction indefinitely (e.g. Gemini logged-in with chip-only state).
+        if (panelOwnedByCurrentTurn && revealAttempted && !openedByParser && citationCandidateCount > 0) {
+          const chipSources = (latestTurnCitationButtons as HTMLElement[]).reduce<ExtractedSourceGroup[]>((groups, button) => {
+            const ariaLabel = (button.getAttribute('aria-label') || '').trim()
+            const nameMatch = ariaLabel.match(/citation from\s+(.+?)\s*\.\s+Press Enter/i)
+            const chipTitle = nameMatch
+              ? nameMatch[1].trim()
+              : this.stripSnippetFromTitle(button.textContent?.replace(/\s+/g, ' ').trim() || '')
+            if (chipTitle) {
+              groups.push({ domain_title: chipTitle, domain_name: '', sources: [{ source_title: chipTitle, source_url: undefined }] })
+            }
+            return groups
+          }, [])
+          if (chipSources.length > 0) {
+            if (panelOwnedAtClose) { closeSourcesPanelIfOpen() }
+            clearPanelOwnership()
+            if (currentResponseId) { this.extractedResponseIds.add(currentResponseId) }
+            if (currentResponseId) { this.sourceExtractionStatusByResponseId.set(currentResponseId, 'none') }
+            if (currentResponseId) { this.loggedCompletedSkipResponseIds.delete(currentResponseId) }
+            console.log(`[GeminiParser] Panel open but anchors empty after retry; finalizing with ${chipSources.length} chip-based partial sources`)
+            return chipSources
+          }
+        }
         console.log('[GeminiParser] Citation affordance present but no source detail links captured yet - waiting for next mutation')
         return []
       }
