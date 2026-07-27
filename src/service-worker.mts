@@ -651,7 +651,7 @@ class ChatGPTCaptureManager {
     })
 
     // PDK dispatch suppressed: chatbot interactions captured but not sent to PDK.
-    // dispatchEvent({ name: 'webmunk-live-mirror', ... }) intentionally disabled.
+    // dispatchEvent({ name: 'rex-live-mirror', ... }) intentionally disabled.
     console.log('[ChatGPT Capture] PDK dispatch suppressed (sendToPDK no-op)')
   }
 
