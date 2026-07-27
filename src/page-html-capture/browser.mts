@@ -16,6 +16,8 @@ export interface PageHtmlCaptureConfig {
     [platform: string]: {
       enabled: boolean
       captureIntervalMs: number // How often to capture (e.g., 10000 for 10s)
+      intervalMs?: number
+      emitOnlyOnChange?: boolean
       snapshotSelectors?: SnapshotSelectors
       sourceCapture?: SourceCaptureConfig
       fullPageFallbackEnabled?: boolean
@@ -45,6 +47,11 @@ type SourceStabilityState = {
   lastSourcesFingerprint: string | null
 }
 
+type PeriodicFullPageCaptureState = {
+  lastCheckedAtMs: number
+  lastFingerprint: string | null
+}
+
 type ChatbotSelectors = {
   userMessage?: string
   userQuestion?: string
@@ -70,6 +77,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
   private config: PageHtmlCaptureConfig | null = null
   private appConfiguration: AppConfiguration | null = null
   private captureIntervalId: NodeJS.Timeout | null = null
+  private periodicFullPageCaptureIntervalId: NodeJS.Timeout | null = null
   private captureSequence: number = 0
   private interactionCorrelationId: string | null = null // Link captures to interactions
   private interactionCorrelationSetAtMs: number = 0
@@ -78,8 +86,10 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
   private isSourceCaptureLocked: boolean = false
   private listenersInstalled: boolean = false
   private sourceStabilityByPlatform: Map<string, SourceStabilityState> = new Map()
+  private periodicFullPageCaptureStateByPlatform: Map<string, PeriodicFullPageCaptureState> = new Map()
   private lastDispatchedQaFingerprint: Map<string, string> = new Map() // Track sent QA snapshots to avoid duplicates
   private readonly MIN_CAPTURE_INTERVAL_MS = 5000 // Don't capture faster than 5 seconds
+  private readonly DEFAULT_PERIODIC_FULL_PAGE_CAPTURE_INTERVAL_MS = 45000
   private readonly MAX_CAPTURES_PER_SESSION = 1000 // Memory safety
   private readonly MAX_CORRELATION_AGE_MS = 30000 // Prevent stale join keys from leaking across turns
 
@@ -130,7 +140,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
 
     const platformConfig = this.config.platformConfigs[platform]
     const intervalMs = Math.max(
-      platformConfig.captureIntervalMs ?? 10000,
+      platformConfig.intervalMs ?? platformConfig.captureIntervalMs ?? this.DEFAULT_PERIODIC_FULL_PAGE_CAPTURE_INTERVAL_MS,
       this.MIN_CAPTURE_INTERVAL_MS
     )
 
@@ -227,6 +237,45 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
     return this.findCommonAncestor(latestQuestion, latestResponse)
   }
 
+  private getPeriodicFullPageCaptureState(platform: string): PeriodicFullPageCaptureState {
+    const existing = this.periodicFullPageCaptureStateByPlatform.get(platform)
+    if (existing) {
+      return existing
+    }
+
+    const created: PeriodicFullPageCaptureState = {
+      lastCheckedAtMs: 0,
+      lastFingerprint: null,
+    }
+    this.periodicFullPageCaptureStateByPlatform.set(platform, created)
+    return created
+  }
+
+  private buildPeriodicFullPageFingerprint(platform: string, pageHtml: string): string {
+    const normalized = pageHtml.replace(/\s+/g, ' ').trim()
+    const head = normalized.slice(0, 1024)
+    const tail = normalized.slice(Math.max(0, normalized.length - 1024))
+    return [platform, window.location.href, String(normalized.length), head, tail].join('|')
+  }
+
+  private async captureFullPageFromTabWithRetries(maxRetries: number = 3): Promise<string | null> {
+    const retryDelaysMs = [0, 1500, 3500]
+
+    for (let attempt = 0; attempt < maxRetries; attempt += 1) {
+      if (retryDelaysMs[attempt] > 0) {
+        await new Promise<void>(resolve => { setTimeout(resolve, retryDelaysMs[attempt]) })
+      }
+
+      const root = document.documentElement
+      const html = root?.outerHTML || document.body?.outerHTML || ''
+      if (html.trim().length > 0) {
+        return html
+      }
+    }
+
+    return null
+  }
+
   private startCapture(): void {
     const platform = this.detectPlatform()
     if (!platform) {
@@ -242,6 +291,9 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
 
     console.log('[Page HTML Capture] Starting periodic capture on', platform, 'interval:', intervalMs)
 
+    this.stopCapture()
+    this.stopPeriodicFullPageCapture()
+
     // Capture immediately
     this.captureAndSend(platform, false)
 
@@ -249,6 +301,71 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
     this.captureIntervalId = setInterval(() => {
       this.captureAndSend(platform, false)
     }, intervalMs)
+
+    if (this.isFullPageFallbackEnabled(platform)) {
+      this.startPeriodicFullPageCapture(platform)
+    }
+  }
+
+  private startPeriodicFullPageCapture(platform: string): void {
+    const intervalMs = Math.max(
+      this.config?.platformConfigs?.[platform]?.intervalMs
+        ?? this.config?.platformConfigs?.[platform]?.captureIntervalMs
+        ?? this.DEFAULT_PERIODIC_FULL_PAGE_CAPTURE_INTERVAL_MS,
+      this.MIN_CAPTURE_INTERVAL_MS,
+    )
+
+    console.log('[Page HTML Capture] Starting periodic full-page capture on', platform, 'interval:', intervalMs)
+    void this.maybeCapturePeriodicFullPageSnapshots(platform)
+
+    this.periodicFullPageCaptureIntervalId = setInterval(() => {
+      void this.maybeCapturePeriodicFullPageSnapshots(platform)
+    }, intervalMs)
+  }
+
+  private stopPeriodicFullPageCapture(): void {
+    if (this.periodicFullPageCaptureIntervalId !== null) {
+      clearInterval(this.periodicFullPageCaptureIntervalId)
+      this.periodicFullPageCaptureIntervalId = null
+    }
+  }
+
+  private async maybeCapturePeriodicFullPageSnapshots(platform: string): Promise<void> {
+    const state = this.getPeriodicFullPageCaptureState(platform)
+    const now = Date.now()
+    const intervalMs = Math.max(
+      this.config?.platformConfigs?.[platform]?.intervalMs
+        ?? this.config?.platformConfigs?.[platform]?.captureIntervalMs
+        ?? this.DEFAULT_PERIODIC_FULL_PAGE_CAPTURE_INTERVAL_MS,
+      this.MIN_CAPTURE_INTERVAL_MS,
+    )
+
+    if (state.lastCheckedAtMs > 0 && (now - state.lastCheckedAtMs) < intervalMs) {
+      return
+    }
+
+    const pageHtml = await this.captureFullPageFromTabWithRetries()
+    if (!pageHtml) {
+      state.lastCheckedAtMs = now
+      return
+    }
+
+    const fingerprint = this.buildPeriodicFullPageFingerprint(platform, pageHtml)
+    const emitOnlyOnChange = this.config?.platformConfigs?.[platform]?.emitOnlyOnChange !== false
+
+    if (emitOnlyOnChange && state.lastFingerprint === fingerprint) {
+      state.lastCheckedAtMs = now
+      console.log('[Page HTML Capture] Skipping periodic full-page capture - HTML unchanged', {
+        platform,
+        fingerprint,
+      })
+      return
+    }
+
+    state.lastCheckedAtMs = now
+    state.lastFingerprint = fingerprint
+
+    await this.sendFullPageCapture(platform, pageHtml, false)
   }
 
   private computeHtmlFingerprint(value: string): string {
@@ -351,17 +468,26 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
         return
       }
 
-      const captureType = captureRoot ? 'qa' : 'full_page'
-      const pageHtml = captureRoot
-        ? captureRoot.outerHTML
-        : (document.body ?? document.documentElement).outerHTML
-
       if (!captureRoot) {
-        console.log('[Page HTML Capture] Q&A selectors not resolved, capturing full page via fallback toggle', {
-          platform,
-          url: window.location.href,
-        })
+        if (!isFinal) {
+          return
+        }
+
+        const pageHtml = (await this.captureFullPageFromTabWithRetries()) ?? ''
+        if (pageHtml.length === 0) {
+          console.log('[Page HTML Capture] Final full-page capture unavailable after retries', {
+            platform,
+            url: window.location.href,
+          })
+          return
+        }
+
+        await this.sendFullPageCapture(platform, pageHtml, true)
+        return
       }
+
+      const captureType = 'qa'
+      const pageHtml = captureRoot.outerHTML
 
       // Deduplication: for QA captures, only dispatch if HTML has changed
       const shouldDispatch = (() => {
@@ -435,6 +561,41 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
     } catch (error) {
       console.error('[Page HTML Capture] Error capturing/sending page HTML:', error)
     }
+  }
+
+  private async sendFullPageCapture(platform: string, pageHtml: string, isFinal: boolean): Promise<void> {
+    if (this.captureSequence >= this.MAX_CAPTURES_PER_SESSION) {
+      console.warn('[Page HTML Capture] Max captures reached for this session')
+      return
+    }
+
+    this.captureSequence += 1
+
+    const now = Date.now()
+    const capture = {
+      captureId: `${platform}_full_${now}_${Math.random().toString(36).slice(2, 8)}`,
+      platform,
+      sequence: this.captureSequence,
+      url: window.location.href,
+      timestamp: now,
+      isFinal,
+      pageHtmlLength: pageHtml.length,
+      pageHtml,
+      correlationId: this.getActiveCorrelationId(now),
+    }
+
+    await chrome.runtime.sendMessage({
+      messageType: 'pageHtmlCaptureData',
+      capture,
+    })
+
+    console.log('[Page HTML Capture] Full-page capture sent', {
+      captureId: capture.captureId,
+      sequence: this.captureSequence,
+      platform,
+      isFinal,
+      length: pageHtml.length,
+    })
   }
 
   private isUserInactive(thresholdMs: number): boolean {
@@ -589,6 +750,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       this.captureIntervalId = null
       console.log('[Page HTML Capture] Capture stopped')
     }
+    this.stopPeriodicFullPageCapture()
   }
 
   private handleVisibilityChange(): void {
