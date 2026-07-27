@@ -295,28 +295,8 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
             console.log(`[LLM Chatbot] Re-transmitting qa_pair with newly-enriched sources (${interaction.sources.length} sources)`)
           }
 
-          // Emit a combined Q/A event for live capture.
-          dispatchEvent({
-            name: 'chatbot-interaction',
-            date: new Date(interaction.timestamp),
-            chatbot_name: interaction.source,
-            interaction: {
-              url: interaction.url || pendingQuestion.url,
-              question_timestamp: pendingQuestion.question_timestamp || pendingQuestion.timestamp,
-              response_timestamp: interaction.timestamp,
-              question: {
-                content: pendingQuestion.content,
-                length: pendingQuestion.length,
-              },
-              response: {
-                content: interaction.content,
-                length: interaction.length,
-                sources: interaction.sources,
-                source_extraction: interaction.source_extraction,
-              },
-              conversation_id: interaction.conversation_id || pendingQuestion.conversation_id,
-            }
-          })
+          // PDK dispatch suppressed: chatbot interactions captured but not sent to PDK.
+          // dispatchEvent({ name: 'chatbot-interaction', ... }) intentionally disabled.
 
           markTransmitted(pendingQuestion)
           markTransmitted(interaction)
@@ -670,11 +650,9 @@ class ChatGPTCaptureManager {
       message_count: data.messages?.length || 0
     })
 
-    dispatchEvent({
-      name: 'webmunk-live-mirror',
-      chatbot_name: data.platform,  // Secondary identifier: chatgpt, perplexity, etc.
-      ...data
-    })
+    // PDK dispatch suppressed: chatbot interactions captured but not sent to PDK.
+    // dispatchEvent({ name: 'webmunk-live-mirror', ... }) intentionally disabled.
+    console.log('[ChatGPT Capture] PDK dispatch suppressed (sendToPDK no-op)')
   }
 
   /**
