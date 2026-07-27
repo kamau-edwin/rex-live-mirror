@@ -156,18 +156,8 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
       size: capture.pageHtmlLength,
     })
 
-    // Emit event for analytics/monitoring
-    if (capture.isFinal) {
-      void dispatchEvent({
-        name: 'pdk-app-event',
-        event_name: 'page_html_capture_final',
-        generatorId: 'page-html-capture',
-        platform: capture.platform,
-        captureSequence: capture.sequence,
-        finalHtmlLength: capture.pageHtmlLength,
-        url: capture.url,
-      })
-    }
+    // PDK dispatch disabled: page HTML captures stored in-memory but metadata-only events discarded
+    // (capture.isFinal check and dispatchEvent intentionally removed; no actual HTML sent to PDK)
   }
 
   private getCapturesByUrl(url: string): PageHtmlCapture[] {
