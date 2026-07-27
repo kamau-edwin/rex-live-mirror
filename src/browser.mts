@@ -184,6 +184,175 @@ class LLMChatbotBrowserModule extends REXClientModule {
     return true
   }
 
+  private detectLoginStateFromSelectors(platformConfig: any): 'logged_in' | 'logged_out' | 'unknown' { // eslint-disable-line @typescript-eslint/no-explicit-any
+    try {
+      const loggedInSelector = typeof platformConfig?.login_detection?.loggedInSelector === 'string'
+        ? platformConfig.login_detection.loggedInSelector.trim()
+        : ''
+      const loggedOutSelector = typeof platformConfig?.login_detection?.loggedOutSelector === 'string'
+        ? platformConfig.login_detection.loggedOutSelector.trim()
+        : ''
+
+      const hasLoggedInMarker = loggedInSelector.length > 0
+        ? document.querySelector(loggedInSelector) !== null
+        : false
+      const hasLoggedOutMarker = loggedOutSelector.length > 0
+        ? document.querySelector(loggedOutSelector) !== null
+        : false
+
+      if (hasLoggedOutMarker && !hasLoggedInMarker) {
+        return 'logged_out'
+      }
+
+      if (hasLoggedInMarker || !hasLoggedOutMarker) {
+        return 'logged_in'
+      }
+    } catch (error) {
+      console.warn('[LLM Chatbot Browser] Login-state selector evaluation failed:', error)
+    }
+
+    return 'unknown'
+  }
+
+  private extractSelectorsFromAuditPrimary(primary: any): Record<string, string> | null { // eslint-disable-line @typescript-eslint/no-explicit-any
+    if (!primary || typeof primary !== 'object') {
+      return null
+    }
+
+    const selectors: Record<string, string> = {}
+    for (const [key, value] of Object.entries(primary as Record<string, unknown>)) {
+      if (!value || typeof value !== 'object') {
+        continue
+      }
+
+      const selector = typeof (value as { selector?: unknown }).selector === 'string'
+        ? (value as { selector: string }).selector.trim()
+        : ''
+
+      if (selector.length > 0) {
+        selectors[key] = selector
+      }
+    }
+
+    return Object.keys(selectors).length > 0 ? selectors : null
+  }
+
+  private extractSelectorFallbacksFromAudit(fallbacks: any): Record<string, string[]> | null { // eslint-disable-line @typescript-eslint/no-explicit-any
+    if (!fallbacks || typeof fallbacks !== 'object') {
+      return null
+    }
+
+    const byKey: Record<string, string[]> = {}
+
+    for (const [rawKey, value] of Object.entries(fallbacks as Record<string, unknown>)) {
+      if (!value || typeof value !== 'object') {
+        continue
+      }
+
+      const selector = typeof (value as { selector?: unknown }).selector === 'string'
+        ? (value as { selector: string }).selector.trim()
+        : ''
+      if (selector.length === 0) {
+        continue
+      }
+
+      const normalizedKey = rawKey.replace(/__fb\d+$/, '')
+      if (!byKey[normalizedKey]) {
+        byKey[normalizedKey] = []
+      }
+
+      if (!byKey[normalizedKey].includes(selector)) {
+        byKey[normalizedKey].push(selector)
+      }
+    }
+
+    return Object.keys(byKey).length > 0 ? byKey : null
+  }
+
+  private resolveStatePayload(platformConfig: any, loginState: 'logged_in' | 'logged_out'): any | null { // eslint-disable-line @typescript-eslint/no-explicit-any
+    const candidates = [
+      platformConfig?.selector_audit,
+      platformConfig?.selectors_by_state,
+      platformConfig?.selector_profiles,
+      platformConfig?.state_profiles,
+      platformConfig?.states,
+    ]
+
+    for (const container of candidates) {
+      if (!container || typeof container !== 'object') {
+        continue
+      }
+
+      const statePayload = (container as Record<string, unknown>)[loginState]
+      if (statePayload && typeof statePayload === 'object') {
+        return statePayload
+      }
+    }
+
+    const inlinePayload = platformConfig?.[loginState]
+    if (inlinePayload && typeof inlinePayload === 'object') {
+      return inlinePayload
+    }
+
+    return null
+  }
+
+  private resolveEffectivePlatformConfig(
+    platformName: string,
+    platformConfig: any, // eslint-disable-line @typescript-eslint/no-explicit-any
+  ): any { // eslint-disable-line @typescript-eslint/no-explicit-any
+    if (!platformConfig || typeof platformConfig !== 'object') {
+      return platformConfig
+    }
+
+    const loginState = this.detectLoginStateFromSelectors(platformConfig)
+    const selectedState = loginState === 'unknown' ? 'logged_in' : loginState
+    const statePayload = this.resolveStatePayload(platformConfig, selectedState)
+
+    if (!statePayload) {
+      return platformConfig
+    }
+
+    const baseSelectors =
+      platformConfig.selectors && typeof platformConfig.selectors === 'object'
+        ? platformConfig.selectors
+        : {}
+    const stateSelectors =
+      statePayload.selectors && typeof statePayload.selectors === 'object'
+        ? statePayload.selectors
+        : this.extractSelectorsFromAuditPrimary(statePayload.primary) || {}
+
+    const baseFallbacks =
+      platformConfig.selector_fallbacks && typeof platformConfig.selector_fallbacks === 'object'
+        ? platformConfig.selector_fallbacks
+        : {}
+    const stateFallbacks =
+      statePayload.selector_fallbacks && typeof statePayload.selector_fallbacks === 'object'
+        ? statePayload.selector_fallbacks
+        : this.extractSelectorFallbacksFromAudit(statePayload.fallbacks) || {}
+
+    const mergedConfig = {
+      ...platformConfig,
+      ...statePayload,
+      selectors: {
+        ...baseSelectors,
+        ...stateSelectors,
+      },
+      selector_fallbacks: {
+        ...baseFallbacks,
+        ...stateFallbacks,
+      },
+      active_login_state: selectedState,
+    }
+
+    console.log(`[LLM Chatbot Browser] ${platformName} selector profile resolved for state: ${selectedState}`, {
+      selectors: Object.keys(mergedConfig.selectors || {}).length,
+      fallbackGroups: Object.keys(mergedConfig.selector_fallbacks || {}).length,
+    })
+
+    return mergedConfig
+  }
+
   private getConfiguredHosts(platformConfig: any, defaults: string[]): string[] { // eslint-disable-line @typescript-eslint/no-explicit-any
     const configuredHosts = this.normalizeStringArray(platformConfig?.hosts)
     if (configuredHosts.length > 0) {
@@ -217,10 +386,10 @@ class LLMChatbotBrowserModule extends REXClientModule {
 
     // Get platform-specific configs
     const platforms = llmConfig.platforms || {}
-    const perplexityConfig = platforms.perplexity || {}
-    const chatgptConfig = platforms.chatgpt || {}
-    const geminiConfig = platforms.gemini || {}
-    const claudeConfig = platforms.claude || {}
+    const perplexityConfig = this.resolveEffectivePlatformConfig('perplexity', platforms.perplexity || {})
+    const chatgptConfig = this.resolveEffectivePlatformConfig('chatgpt', platforms.chatgpt || {})
+    const geminiConfig = this.resolveEffectivePlatformConfig('gemini', platforms.gemini || {})
+    const claudeConfig = this.resolveEffectivePlatformConfig('claude', platforms.claude || {})
 
     const perplexityHosts = this.getConfiguredHosts(perplexityConfig, ['www.perplexity.ai', 'perplexity.ai'])
     const chatgptHosts = this.getConfiguredHosts(chatgptConfig, ['chatgpt.com'])
