@@ -190,13 +190,11 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
   }
 
   /**
-   * Validate captured HTML has minimum content and expected structure.
+   * Validate captured HTML has expected Q&A structure based on platform markers.
+   * Does NOT reject based on size - only checks for content markers.
    */
   private isValidQACapture(html: string, platform: string): boolean {
-    const MIN_SIZE = 500  // Reject tiny captures (likely errors/loading)
-
-    if (!html || html.length < MIN_SIZE) {
-      console.log('[Page HTML Capture] Rejected - HTML too small:', html.length, 'bytes')
+    if (!html) {
       return false
     }
 
@@ -211,17 +209,30 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
 
     const markers = qaMarkers[platform] || []
     if (markers.length === 0) {
-      console.log('[Page HTML Capture] No Q&A markers configured for', platform)
+      console.log('[Page HTML Capture] No Q&A markers configured for', platform, '- accepting HTML as-is')
       return true  // Unknown platform, accept anyway
     }
 
     const hasMarker = markers.some(m => html.includes(m))
     if (!hasMarker) {
-      console.log('[Page HTML Capture] Rejected - no Q&A markers found in HTML')
+      console.log('[Page HTML Capture] HTML missing Q&A markers for', platform)
       return false
     }
 
     return true
+  }
+
+  /**
+   * Get fallback HTML from body if container validation fails.
+   * Prefers minimal content over empty capture.
+   */
+  private getFallbackHTMLContent(): string {
+    const body = document.body?.outerHTML || ''
+    if (body.length > 0) {
+      console.log('[Page HTML Capture] Using body fallback, size:', body.length)
+      return body
+    }
+    return ''
   }
 
   private detectPlatform(): string | null {
@@ -571,12 +582,17 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
         }
 
         // Validate full-page capture contains Q&A structure
+        let validatedHtml = pageHtml
         if (!this.isValidQACapture(pageHtml, platform)) {
-          console.log('[Page HTML Capture] Rejecting full-page capture - no valid Q&A structure')
-          return
+          console.log('[Page HTML Capture] Full-page HTML missing Q&A markers - falling back to body')
+          validatedHtml = this.getFallbackHTMLContent()
+          if (!validatedHtml) {
+            console.log('[Page HTML Capture] No fallback content available')
+            return
+          }
         }
 
-        await this.sendFullPageCapture(platform, pageHtml, true)
+        await this.sendFullPageCapture(platform, validatedHtml, true)
         return
       }
 
@@ -584,9 +600,14 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       const pageHtml = captureRoot.outerHTML
 
       // Validate container capture contains Q&A structure
+      let validatedHtml = pageHtml
       if (!this.isValidQACapture(pageHtml, platform)) {
-        console.log('[Page HTML Capture] Rejecting container capture - no valid Q&A structure')
-        return
+        console.log('[Page HTML Capture] Container HTML missing Q&A markers - falling back to body')
+        validatedHtml = this.getFallbackHTMLContent()
+        if (!validatedHtml) {
+          console.log('[Page HTML Capture] No fallback content available')
+          return
+        }
       }
 
       // Deduplication: for QA captures, only dispatch if HTML has changed
@@ -594,7 +615,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
         if (isFinal) return true // Always dispatch final snapshots
         if (captureType !== 'qa') return true // Always dispatch full_page captures
         
-        const fingerprint = this.computeHtmlFingerprint(pageHtml)
+        const fingerprint = this.computeHtmlFingerprint(validatedHtml)
         const lastFingerprint = this.lastDispatchedQaFingerprint.get(platform)
         if (lastFingerprint === fingerprint) {
           console.log('[Page HTML Capture] Skipping QA dispatch - HTML unchanged', {
@@ -602,7 +623,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
             fingerprint,
           })
           // Still update stability tracking even though we skip dispatch
-          this.updateSourceStability(platform, captureType, pageHtml)
+          this.updateSourceStability(platform, captureType, validatedHtml)
           // Opportunistically attempt sources capture
           void this.captureSourcesIfPossible(platform)
           return false
@@ -625,8 +646,8 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
         timestamp: now,
         isFinal,
         captureType,
-        pageHtmlLength: pageHtml.length,
-        pageHtml,
+        pageHtmlLength: validatedHtml.length,
+        pageHtml: validatedHtml,
         correlationId: this.getActiveCorrelationId(now),
       }
 
@@ -642,7 +663,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
         platform,
         isFinal,
         captureType,
-        length: pageHtml.length,
+        length: validatedHtml.length,
         captureRootTag: captureRoot?.tagName ?? 'BODY',
       })
 
