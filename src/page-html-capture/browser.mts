@@ -18,6 +18,9 @@ export interface PageHtmlCaptureConfig {
       captureIntervalMs: number // How often to capture (e.g., 10000 for 10s)
       intervalMs?: number
       emitOnlyOnChange?: boolean
+      containerSelector?: string // Primary: container holding Q&A (e.g., div[role='main'], main, chat-window-content)
+      qaSelector?: string // Q&A message elements
+      sourceSelector?: string // Source/citation links
       snapshotSelectors?: SnapshotSelectors
       sourceCapture?: SourceCaptureConfig
       fullPageFallbackEnabled?: boolean
@@ -207,6 +210,20 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
   }
 
   private resolveCaptureRoot(platform: string): Element | null {
+    // Priority 1: Try containerSelector (new platform-agnostic approach)
+    const platformConfig = this.config?.platformConfigs?.[platform]
+    if (platformConfig?.containerSelector) {
+      const selectors = platformConfig.containerSelector.split(',').map(s => s.trim())
+      for (const selector of selectors) {
+        const container = document.querySelector(selector)
+        if (container) {
+          console.log('[Page HTML Capture] Found container via containerSelector:', selector)
+          return container
+        }
+      }
+    }
+
+    // Fallback: Use snapshotSelectors (legacy approach)
     const selectors = this.getSnapshotSelectors(platform)
     if (!selectors?.question || !selectors?.response) {
       return null
