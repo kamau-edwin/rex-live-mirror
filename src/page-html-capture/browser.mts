@@ -641,6 +641,8 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       const capture = {
         captureId: `${platform}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         platform,
+        chatbot_name: platform,
+        secondary_identifier: platform,
         sequence: this.captureSequence,
         url: window.location.href,
         timestamp: now,
@@ -696,6 +698,8 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
     const capture = {
       captureId: `${platform}_full_${now}_${Math.random().toString(36).slice(2, 8)}`,
       platform,
+      chatbot_name: platform,
+      secondary_identifier: platform,
       sequence: this.captureSequence,
       url: window.location.href,
       timestamp: now,

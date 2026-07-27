@@ -15,6 +15,8 @@ import { REXServiceWorkerModule, registerREXModule, dispatchEvent } from '@bric/
 export interface PageHtmlCapture {
   captureId: string
   platform: string
+  chatbot_name?: string
+  secondary_identifier?: string
   sequence: number
   url: string
   timestamp: number
@@ -149,6 +151,8 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
     console.log('[Page HTML Capture] Capture stored', {
       captureId: capture.captureId,
       platform: capture.platform,
+      chatbot_name: capture.chatbot_name ?? capture.platform,
+      secondary_identifier: capture.secondary_identifier ?? capture.chatbot_name ?? capture.platform,
       sequence: capture.sequence,
       isFinal: capture.isFinal,
       url: capture.url,
