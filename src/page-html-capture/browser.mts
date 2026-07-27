@@ -162,6 +162,68 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
     return this.config?.fullPageFallbackEnabled === true
   }
 
+  /**
+   * Check if page has Q&A content using qaSelector from config.
+   * Prevents capturing empty/error/loading pages.
+   */
+  private hasQAContent(platform: string): boolean {
+    const platformConfig = this.config?.platformConfigs?.[platform]
+    if (!platformConfig?.qaSelector) {
+      console.log('[Page HTML Capture] No qaSelector configured for', platform)
+      return false
+    }
+
+    try {
+      const selectors = platformConfig.qaSelector.split(',').map(s => s.trim())
+      for (const selector of selectors) {
+        const elements = document.querySelectorAll(selector)
+        if (elements.length > 0) {
+          console.log('[Page HTML Capture] Found Q&A content via selector:', selector)
+          return true
+        }
+      }
+    } catch (error) {
+      console.warn('[Page HTML Capture] Error checking Q&A content:', error)
+    }
+
+    return false
+  }
+
+  /**
+   * Validate captured HTML has minimum content and expected structure.
+   */
+  private isValidQACapture(html: string, platform: string): boolean {
+    const MIN_SIZE = 500  // Reject tiny captures (likely errors/loading)
+
+    if (!html || html.length < MIN_SIZE) {
+      console.log('[Page HTML Capture] Rejected - HTML too small:', html.length, 'bytes')
+      return false
+    }
+
+    // Check for presence of key Q&A markers based on platform
+    const qaMarkers: Record<string, string[]> = {
+      chatgpt: ['data-message-role', 'conversation-turn', 'message-author-role'],
+      perplexity: ['markdown-content', 'prose', 'group/query'],
+      gemini: ['model-response', 'user-query', 'conversation-container'],
+      claude: ['message', 'assistant', 'user'],
+      copilot: ['message', 'assistant', 'user'],
+    }
+
+    const markers = qaMarkers[platform] || []
+    if (markers.length === 0) {
+      console.log('[Page HTML Capture] No Q&A markers configured for', platform)
+      return true  // Unknown platform, accept anyway
+    }
+
+    const hasMarker = markers.some(m => html.includes(m))
+    if (!hasMarker) {
+      console.log('[Page HTML Capture] Rejected - no Q&A markers found in HTML')
+      return false
+    }
+
+    return true
+  }
+
   private detectPlatform(): string | null {
     const hostname = window.location.hostname
     if (hostname.includes('chatgpt.com')) return 'chatgpt'
@@ -486,6 +548,15 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       }
 
       if (!captureRoot) {
+        // Before attempting full-page fallback, verify Q&A content exists on page
+        if (!this.hasQAContent(platform)) {
+          console.log('[Page HTML Capture] Skipping full-page fallback - no Q&A content found', {
+            platform,
+            url: window.location.href,
+          })
+          return
+        }
+
         if (!isFinal) {
           return
         }
@@ -499,12 +570,24 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
           return
         }
 
+        // Validate full-page capture contains Q&A structure
+        if (!this.isValidQACapture(pageHtml, platform)) {
+          console.log('[Page HTML Capture] Rejecting full-page capture - no valid Q&A structure')
+          return
+        }
+
         await this.sendFullPageCapture(platform, pageHtml, true)
         return
       }
 
       const captureType = 'qa'
       const pageHtml = captureRoot.outerHTML
+
+      // Validate container capture contains Q&A structure
+      if (!this.isValidQACapture(pageHtml, platform)) {
+        console.log('[Page HTML Capture] Rejecting container capture - no valid Q&A structure')
+        return
+      }
 
       // Deduplication: for QA captures, only dispatch if HTML has changed
       const shouldDispatch = (() => {
