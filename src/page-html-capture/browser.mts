@@ -42,6 +42,7 @@ type SourceCaptureConfig = {
   sourcePanelSelector?: string    // element to verify panel opened
   sourceCloseSelector?: string    // element to close panel (falls back to re-clicking toggle)
   panelWaitMs?: number            // ms to wait after click before capturing (default 800)
+  panelOutsideContainer?: boolean // true when sourcePanelSelector renders as a sibling of containerSelector rather than inside it (e.g. ChatGPT's Sources flyout) — captures document.body instead of the scoped container so the panel content isn't dropped
 }
 
 type SourceStabilityState = {
@@ -827,7 +828,14 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       // Sources captures are opportunistic — only meaningful with a scoped Q&A root.
       // Unlike interval captures, there is no full_page fallback here: a raw dump with
       // the source panel open is not analytically useful without the Q&A structure.
-      const captureRoot = this.resolveCaptureRoot(platform)
+      //
+      // Some platforms (e.g. ChatGPT) render the sources panel as a DOM sibling of
+      // the Q&A container rather than a descendant, so the scoped container capture
+      // would silently drop the panel content. panelOutsideContainer opts into
+      // capturing the full document body in that case instead.
+      const captureRoot = sourceCaptureConfig.panelOutsideContainer
+        ? document.body
+        : this.resolveCaptureRoot(platform)
       if (captureRoot) {
         const pageHtml = captureRoot.outerHTML
         this.captureSequence += 1
