@@ -2,14 +2,14 @@ import { REXServiceWorkerModule, registerREXModule, dispatchEvent } from '@bric/
 
 /**
  * Page HTML Capture Service Worker Module
- * 
- * Receives page HTML captures from browser module and maintains:
- * - In-memory capture storage by URL
- * - Correlation linkage between captures and interactions
+ *
+ * Receives page HTML captures from the browser module, maintains:
+ * - In-memory capture storage by URL / correlation ID
  * - Cleanup of stale captures
- * 
- * Provides storage hooks for dependent modules (e.g., news_eval)
- * to integrate captures into their pipelines.
+ *
+ * and is the sole owner of dispatching chatbot-html-snapshot events to PDK
+ * (mirrors the pattern used by rex-web-visits: capture, dedup, and dispatch
+ * all live in this one module via the shared dispatchEvent bus).
  */
 
 export interface PageHtmlCapture {
@@ -21,9 +21,12 @@ export interface PageHtmlCapture {
   url: string
   timestamp: number
   isFinal: boolean
+  captureType?: string
   pageHtmlLength: number
   pageHtml: string
   correlationId?: string | null
+  source?: string
+  generatorId?: string
 }
 
 export interface PageHtmlCaptureStorageConfig {
@@ -33,15 +36,192 @@ export interface PageHtmlCaptureStorageConfig {
   staleCaptureThresholdMs?: number
 }
 
+interface DedupState {
+  lastEmittedAtMs: number
+  lastFingerprintByIdentifier: Map<string, string>
+}
+
+const DEFAULT_DEDUP_WINDOW_MS = 15000
+const DEFAULT_SNIPPET_MAX_LENGTH = 200000
+const FALLBACK_HOSTS_BY_PLATFORM: Record<string, string[]> = {
+  perplexity: ['www.perplexity.ai', 'perplexity.ai'],
+  chatgpt: ['chatgpt.com'],
+  gemini: ['gemini.google.com'],
+  claude: ['claude.ai'],
+}
+
+function coerceBoolean(value: unknown): boolean | null {
+  if (typeof value === 'boolean') {
+    return value
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'true') return true
+    if (normalized === 'false') return false
+  }
+  return null
+}
+
+function normalizeChatbotIdentifier(candidate: unknown): string | null {
+  if (typeof candidate !== 'string') {
+    return null
+  }
+  const normalized = candidate.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '')
+  return normalized.length > 0 ? normalized : null
+}
+
+function resolveChatbotIdentifierFromUrl(
+  url: string,
+  configuration: any, // eslint-disable-line @typescript-eslint/no-explicit-any
+): string | null {
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    const platforms = configuration?.llm_capture?.platforms
+
+    if (platforms && typeof platforms === 'object') {
+      for (const [platformName, platformConfig] of Object.entries(platforms as Record<string, unknown>)) {
+        if (!platformConfig || typeof platformConfig !== 'object') {
+          continue
+        }
+
+        const enabled = coerceBoolean((platformConfig as { enabled?: unknown }).enabled)
+        if (enabled === false) {
+          continue
+        }
+
+        const hosts = (platformConfig as { hosts?: unknown }).hosts
+        if (!Array.isArray(hosts)) {
+          continue
+        }
+
+        for (const candidateHost of hosts) {
+          if (typeof candidateHost !== 'string') {
+            continue
+          }
+          const normalizedCandidate = candidateHost.toLowerCase()
+          if (host === normalizedCandidate || host.endsWith(`.${normalizedCandidate}`)) {
+            return normalizeChatbotIdentifier(platformName)
+          }
+        }
+      }
+    }
+
+    // Resilient fallback when backend platform host config is unavailable/incomplete.
+    for (const [platformName, candidateHosts] of Object.entries(FALLBACK_HOSTS_BY_PLATFORM)) {
+      for (const candidateHost of candidateHosts) {
+        const normalizedCandidate = candidateHost.toLowerCase()
+        if (host === normalizedCandidate || host.endsWith(`.${normalizedCandidate}`)) {
+          return normalizeChatbotIdentifier(platformName)
+        }
+      }
+    }
+  } catch {
+    // Ignore parse failures.
+  }
+
+  return null
+}
+
+function shouldDispatchCapture(
+  url: string,
+  configuration: any, // eslint-disable-line @typescript-eslint/no-explicit-any
+  options: { captureType?: string, platform?: string | null },
+): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+
+    const blockedHosts = configuration?.llm_capture?.blocked_hosts
+    if (Array.isArray(blockedHosts) && blockedHosts.includes(host)) {
+      return false
+    }
+
+    const platforms = configuration?.llm_capture?.platforms
+    if (!platforms || typeof platforms !== 'object') {
+      return false
+    }
+
+    const normalizedPlatform = normalizeChatbotIdentifier(options.platform)
+    if (options.captureType === 'full_page' && normalizedPlatform) {
+      const platformConfig = (platforms as Record<string, unknown>)[normalizedPlatform] as { enabled?: unknown } | undefined
+      if (platformConfig && coerceBoolean(platformConfig.enabled) !== false) {
+        return true
+      }
+    }
+
+    for (const value of Object.values(platforms as Record<string, unknown>)) {
+      if (!value || typeof value !== 'object') {
+        continue
+      }
+      if (coerceBoolean((value as { enabled?: unknown }).enabled) === false) {
+        continue
+      }
+      const hosts = (value as { hosts?: unknown }).hosts
+      if (!Array.isArray(hosts)) {
+        continue
+      }
+      for (const candidateHost of hosts) {
+        if (typeof candidateHost !== 'string') {
+          continue
+        }
+        const normalizedCandidate = candidateHost.toLowerCase()
+        if (host === normalizedCandidate || host.endsWith(`.${normalizedCandidate}`)) {
+          return true
+        }
+      }
+    }
+  } catch {
+    return false
+  }
+
+  return false
+}
+
+function resolveSnippetLimit(configuration: any): number | null { // eslint-disable-line @typescript-eslint/no-explicit-any
+  const configured = configuration?.page_html_capture?.bridge?.maxSnippetLength
+
+  if (configured === null) {
+    return null
+  }
+
+  if (typeof configured === 'number' && Number.isFinite(configured)) {
+    return configured <= 0 ? null : Math.floor(configured)
+  }
+
+  if (typeof configured === 'string') {
+    const parsed = Number(configured)
+    if (Number.isFinite(parsed)) {
+      return parsed <= 0 ? null : Math.floor(parsed)
+    }
+  }
+
+  return DEFAULT_SNIPPET_MAX_LENGTH
+}
+
+function resolveDedupWindowMs(configuration: any): number { // eslint-disable-line @typescript-eslint/no-explicit-any
+  const configured = configuration?.extension?.telemetry?.chatbot_html_snapshot_dedup_window_ms
+  if (typeof configured === 'number' && Number.isFinite(configured) && configured > 0) {
+    return Math.floor(configured)
+  }
+  return DEFAULT_DEDUP_WINDOW_MS
+}
+
+function resolveSnapshotEventName(configuration: any): string { // eslint-disable-line @typescript-eslint/no-explicit-any
+  const configured = configuration?.extension?.telemetry?.event_names?.chatbot_html_snapshot
+  return typeof configured === 'string' && configured.trim().length > 0
+    ? configured.trim()
+    : 'chatbot-html-snapshot'
+}
+
 class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
   private enabled: boolean = false
   private config: PageHtmlCaptureStorageConfig | null = null
   private capturesByUrl = new Map<string, PageHtmlCapture[]>()
   private capturesByCorrelationId = new Map<string, PageHtmlCapture[]>()
   private readonly DEFAULT_MAX_CAPTURES_PER_URL = 100
-  private readonly DEFAULT_MAX_CAPTURE_SIZE_BYTES = 5 * 1024 * 1024 // 5 MB
   private readonly DEFAULT_STALE_THRESHOLD_MS = 60 * 60 * 1000 // 1 hour
   private cleanupIntervalId: NodeJS.Timeout | null = null
+  private dedupState: DedupState = { lastEmittedAtMs: 0, lastFingerprintByIdentifier: new Map() }
+  private appConfiguration: any = null // eslint-disable-line @typescript-eslint/no-explicit-any
 
   constructor(config?: PageHtmlCaptureStorageConfig) {
     super()
@@ -63,12 +243,26 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
       return
     }
 
-    // Start cleanup interval (every 5 minutes)
+    this.loadConfiguration()
+
     this.cleanupIntervalId = setInterval(() => {
       this.pruneStaleCaptures()
     }, 5 * 60 * 1000)
 
     console.log('[Page HTML Capture] Service Worker module ready')
+  }
+
+  refreshConfiguration(): void {
+    this.loadConfiguration()
+  }
+
+  private loadConfiguration(): void {
+    chrome.storage.local.get('REXConfiguration', (result) => {
+      const configuration = result?.REXConfiguration
+      if (configuration) {
+        this.appConfiguration = configuration
+      }
+    })
   }
 
   handleMessage(message: any, sender: any, sendResponse: (response: any) => void): boolean { // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -81,11 +275,11 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
       }
 
       this.storeCapture(capture)
+      void this.dispatchCapture(capture)
       sendResponse({ success: true })
 
       return true
     } else if (message?.messageType === 'getPageHtmlCaptures') {
-      // Query captures by URL or correlation ID
       const url = message.url as string | undefined
       const correlationId = message.correlationId as string | undefined
 
@@ -101,7 +295,6 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
 
       return true
     } else if (message?.messageType === 'clearPageHtmlCaptures') {
-      // Clear captures for a specific URL or correlation ID
       const url = message.url as string | undefined
       const correlationId = message.correlationId as string | undefined
 
@@ -119,11 +312,9 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
   }
 
   private storeCapture(capture: PageHtmlCapture): void {
-    // Store by URL
     const capturesByUrl = this.capturesByUrl.get(capture.url) ?? []
     capturesByUrl.push(capture)
 
-    // Enforce max captures per URL
     const maxCapturesPerUrl = this.config?.maxCapturesPerUrl ?? this.DEFAULT_MAX_CAPTURES_PER_URL
     if (capturesByUrl.length > maxCapturesPerUrl) {
       const removed = capturesByUrl.shift()
@@ -135,7 +326,6 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
 
     this.capturesByUrl.set(capture.url, capturesByUrl)
 
-    // Store by correlation ID if provided
     if (capture.correlationId) {
       const capturesByCorrelation = this.capturesByCorrelationId.get(capture.correlationId) ?? []
       capturesByCorrelation.push(capture)
@@ -159,17 +349,101 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
       correlationId: capture.correlationId ?? 'none',
       size: capture.pageHtmlLength,
     })
+  }
 
-    // PDK dispatch disabled: page HTML captures stored in-memory but metadata-only events discarded
-    // (capture.isFinal check and dispatchEvent intentionally removed; no actual HTML sent to PDK)
+  private shouldEmit(secondaryIdentifier: string, url: string, htmlSnippet: string, captureType: string | null, dedupWindowMs: number): boolean {
+    const now = Date.now()
+    const normalizedUrl = url.split('#', 1)[0].split('?', 1)[0]
+    const normalizedSnippet = htmlSnippet.trim()
+    const fingerprint = [
+      secondaryIdentifier,
+      normalizedUrl,
+      captureType ?? 'unspecified',
+      String(normalizedSnippet.length),
+      normalizedSnippet.slice(0, 512),
+    ].join('|')
+
+    const lastFingerprint = this.dedupState.lastFingerprintByIdentifier.get(secondaryIdentifier)
+    const withinWindow = (now - this.dedupState.lastEmittedAtMs) < dedupWindowMs
+
+    if (withinWindow && lastFingerprint === fingerprint) {
+      return false
+    }
+
+    this.dedupState.lastEmittedAtMs = now
+    this.dedupState.lastFingerprintByIdentifier.set(secondaryIdentifier, fingerprint)
+    return true
+  }
+
+  private async dispatchCapture(capture: PageHtmlCapture): Promise<void> {
+    const captureUrl = typeof capture.url === 'string' ? capture.url : null
+    const captureHtml = typeof capture.pageHtml === 'string' ? capture.pageHtml : ''
+
+    if (!captureUrl || captureHtml.length === 0) {
+      return
+    }
+
+    const configuration = this.appConfiguration
+    const captureType = typeof capture.captureType === 'string' ? capture.captureType : 'qa'
+
+    if (!shouldDispatchCapture(captureUrl, configuration, { captureType, platform: capture.platform ?? null })) {
+      return
+    }
+
+    const snippetLimit = resolveSnippetLimit(configuration)
+    const snippet = snippetLimit === null ? captureHtml : captureHtml.slice(0, snippetLimit)
+    const secondaryIdentifier = normalizeChatbotIdentifier(capture.platform)
+      ?? resolveChatbotIdentifierFromUrl(captureUrl, configuration)
+      ?? 'unknown'
+
+    const dedupWindowMs = resolveDedupWindowMs(configuration)
+    if (!this.shouldEmit(secondaryIdentifier, captureUrl, snippet, captureType, dedupWindowMs)) {
+      console.log('[Page HTML Capture] Dispatch skipped (dedup window).', {
+        secondaryIdentifier,
+        captureType,
+        url: captureUrl,
+      })
+      return
+    }
+
+    dispatchEvent({
+      name: 'chatbot-html-snapshot',
+      event_name: resolveSnapshotEventName(configuration),
+      generatorId: capture.generatorId ?? 'chatbot-html-snapshot',
+      secondary_identifier: secondaryIdentifier,
+      chatbot_name: secondaryIdentifier,
+      source: capture.source ?? 'page_html_capture',
+      capture_id: capture.captureId ?? null,
+      capture_sequence: typeof capture.sequence === 'number' ? capture.sequence : null,
+      platform: capture.platform ?? null,
+      correlation_id: capture.correlationId ?? null,
+      snapshot: {
+        url: captureUrl,
+        captured_at_ms: typeof capture.timestamp === 'number' ? capture.timestamp : Date.now(),
+        html_length: typeof capture.pageHtmlLength === 'number' ? capture.pageHtmlLength : captureHtml.length,
+        html_snippet: snippet,
+        html_snippet_limit: snippetLimit,
+        html_snippet_truncated: snippet.length < captureHtml.length,
+        capture_type: captureType,
+        correlation_id: capture.correlationId ?? null,
+        is_final: capture.isFinal === true,
+        title: null,
+      },
+    })
+
+    console.log('[Page HTML Capture] Dispatched chatbot-html-snapshot.', {
+      secondaryIdentifier,
+      captureType,
+      captureId: capture.captureId,
+      url: captureUrl,
+    })
   }
 
   private getCapturesByUrl(url: string): PageHtmlCapture[] {
     const captures = this.capturesByUrl.get(url) ?? []
-    // Return copies without raw HTML to reduce message size
     return captures.map(c => ({
       ...c,
-      pageHtml: '', // Clear HTML from response; fetch separately if needed
+      pageHtml: '',
     }))
   }
 
@@ -177,7 +451,7 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
     const captures = this.capturesByCorrelationId.get(correlationId) ?? []
     return captures.map(c => ({
       ...c,
-      pageHtml: '', // Clear HTML from response; fetch separately if needed
+      pageHtml: '',
     }))
   }
 
@@ -187,7 +461,6 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
     const urlsToDelete: string[] = []
     const correlationIdsToDelete: string[] = []
 
-    // Prune by URL
     for (const [url, captures] of this.capturesByUrl.entries()) {
       const validCaptures = captures.filter(c => (now - c.timestamp) < staleThreshold)
 
@@ -198,7 +471,6 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
       }
     }
 
-    // Prune by correlation ID
     for (const [correlationId, captures] of this.capturesByCorrelationId.entries()) {
       const validCaptures = captures.filter(c => (now - c.timestamp) < staleThreshold)
 
@@ -209,7 +481,6 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
       }
     }
 
-    // Delete empty entries
     for (const url of urlsToDelete) {
       this.capturesByUrl.delete(url)
     }

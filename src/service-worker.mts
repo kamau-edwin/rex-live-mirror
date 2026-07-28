@@ -295,8 +295,45 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
             console.log(`[LLM Chatbot] Re-transmitting qa_pair with newly-enriched sources (${interaction.sources.length} sources)`)
           }
 
-          // PDK dispatch suppressed: chatbot interactions captured but not sent to PDK.
-          // dispatchEvent({ name: 'chatbot-interaction', ... }) intentionally disabled.
+          const hasPageActions = Array.isArray(interaction.page_actions) && interaction.page_actions.length > 0
+          const interactionPayload: Record<string, unknown> = {
+            url: interaction.url ?? pendingQuestion.url,
+            conversation_id: interaction.conversation_id ?? pendingQuestion.conversation_id ?? null,
+            interaction_id: interaction.interaction_id ?? null,
+            updates_interaction_id: interaction.updates_interaction_id ?? null,
+            correlation_id: interaction.interaction_id ?? interaction.updates_interaction_id ?? null,
+            question_timestamp: pendingQuestion.question_timestamp ?? pendingQuestion.timestamp ?? null,
+            response_timestamp: interaction.timestamp ?? null,
+            question: {
+              content: pendingQuestion.content,
+              length: pendingQuestion.length ?? pendingQuestion.content?.length ?? 0,
+            },
+            response: {
+              content: interaction.content,
+              length: interaction.length ?? interaction.content?.length ?? 0,
+              sources: interaction.sources ?? [],
+              source_extraction: Array.isArray(interaction.sources) && interaction.sources.length > 0
+                ? (interaction.source_extraction ?? 'success')
+                : 'none',
+            },
+          }
+
+          if (hasPageActions) {
+            interactionPayload.page_actions = interaction.page_actions
+            interactionPayload.page_actions_summary = interaction.page_actions_summary ?? {
+              captured_count: interaction.page_actions.length,
+              first_ts: interaction.page_actions[0]?.ts ?? null,
+              last_ts: interaction.page_actions[interaction.page_actions.length - 1]?.ts ?? null,
+            }
+          }
+
+          dispatchEvent({
+            name: 'pdk-app-event',
+            event_name: 'chatbot-interaction',
+            generatorId: 'chatbot-interaction',
+            interaction: interactionPayload,
+            chatbot_name: interaction.source ?? pendingQuestion.source ?? 'unknown',
+          })
 
           markTransmitted(pendingQuestion)
           markTransmitted(interaction)
