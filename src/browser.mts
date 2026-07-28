@@ -1772,6 +1772,16 @@ class LLMChatbotBrowserModule extends REXClientModule {
     if (promotedCount > 0) {
       console.log(`[LLM Chatbot Browser] Promoted ${promotedCount} responses (sources button detected)`)
     }
+
+    // Callers other than processPage() (the turn-retry mutation observer and its
+    // setTimeout fallback) can be the ones that finally empty the pending queue.
+    // processPage() only runs the event-driven flush check on its own invocations,
+    // so without this, a promotion triggered from those callers can leave a
+    // fully-ready batch sitting in this.interactions until an unrelated DOM
+    // mutation happens to re-invoke processPage().
+    if (this.pendingSourcesExtraction.size === 0 && this.interactions.length > 0) {
+      this.transmitBatch()
+    }
   }
 
   private sendBatchWithRetry(batch: LLMInteraction[], attempt: number = 1): void {
