@@ -50,6 +50,7 @@ interface PendingSourceExtractionInfo {
   interaction: LLMInteraction
   containerRef?: Element
   turnRetryObserver?: MutationObserver
+  turnRetryFallbackTimer?: ReturnType<typeof setTimeout>
   unresolvedRetryCount: number
 }
 
@@ -671,6 +672,11 @@ class LLMChatbotBrowserModule extends REXClientModule {
   }
 
   private disconnectTurnRetryObserver(pendingEntry?: PendingSourceExtractionInfo): void {
+    if (pendingEntry?.turnRetryFallbackTimer !== undefined) {
+      clearTimeout(pendingEntry.turnRetryFallbackTimer)
+      pendingEntry.turnRetryFallbackTimer = undefined
+    }
+
     if (!pendingEntry?.turnRetryObserver) {
       return
     }
@@ -740,6 +746,25 @@ class LLMChatbotBrowserModule extends REXClientModule {
       characterData: true,
       attributes: true,
     })
+
+    // The mutation that reveals source details (e.g. a sources dialog opened by
+    // maybeOpenSourcesPanel) can happen before this observer starts watching --
+    // extractSources() runs synchronously and may open + populate the panel in
+    // the same tick it is called, so the observer never sees that insertion.
+    // A short fallback timer re-checks shortly after arming regardless of
+    // whether a matching mutation was observed, so a same-tick render still
+    // gets picked up instead of waiting on the (slower, less reliable) full
+    // retry-count/mutation cycle.
+    pendingEntry.turnRetryFallbackTimer = setTimeout(() => {
+      const latestPendingEntry = this.pendingSourcesExtraction.get(prefixKey)
+      if (!latestPendingEntry || latestPendingEntry.turnRetryObserver !== observer) {
+        return
+      }
+      this.disconnectTurnRetryObserver(latestPendingEntry)
+      console.log('[LLM Chatbot Browser] Turn-scoped source retry fallback timer fired for pending response')
+      this.promoteReadyResponses('turn-retry')
+    }, 300)
+
     console.log('[LLM Chatbot Browser] Armed turn-scoped source retry for pending response')
   }
 
