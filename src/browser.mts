@@ -565,6 +565,16 @@ class LLMChatbotBrowserModule extends REXClientModule {
         }
       },
     )
+
+    // Replace waiting on page-html-capture's blind periodic interval with an
+    // event-driven capture fired as soon as this turn's response completes
+    // (or a timeout ceiling elapses, if the completion selector cannot
+    // resolve). The parser already owns isResponseComplete/its selectors;
+    // page-html-capture has no parser of its own, so the check is passed in
+    // rather than duplicated there.
+    if (payload.source !== 'unknown' && typeof this.parser?.isResponseComplete === 'function') {
+      pageCaptureModule.triggerQuestionSubmitCapture(payload.source, () => this.parser.isResponseComplete())
+    }
   }
 
   private installQuestionSubmitCapture(): void {

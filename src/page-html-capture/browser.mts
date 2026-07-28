@@ -97,6 +97,15 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
   private readonly MAX_CAPTURES_PER_SESSION = 1000 // Memory safety
   private readonly MAX_CORRELATION_AGE_MS = 30000 // Prevent stale join keys from leaking across turns
 
+  // Submit-triggered capture: fires as soon as a response completes (or a
+  // timeout ceiling elapses) instead of waiting on the blind periodic interval.
+  private submitCaptureObserver: MutationObserver | null = null
+  private submitCapturePollId: ReturnType<typeof setInterval> | null = null
+  private submitCaptureTimeoutId: ReturnType<typeof setTimeout> | null = null
+  private submitCaptureGeneration = 0
+  private readonly SUBMIT_CAPTURE_POLL_MS = 2000
+  private readonly SUBMIT_CAPTURE_TIMEOUT_MS = 60000
+
   constructor() {
     super()
     console.log('[Page HTML Capture] Browser module initialized')
@@ -436,6 +445,113 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       clearInterval(this.periodicFullPageCaptureIntervalId)
       this.periodicFullPageCaptureIntervalId = null
     }
+  }
+
+  private stopSubmitCaptureWatch(): void {
+    if (this.submitCaptureObserver) {
+      this.submitCaptureObserver.disconnect()
+      this.submitCaptureObserver = null
+    }
+    if (this.submitCapturePollId !== null) {
+      clearInterval(this.submitCapturePollId)
+      this.submitCapturePollId = null
+    }
+    if (this.submitCaptureTimeoutId !== null) {
+      clearTimeout(this.submitCaptureTimeoutId)
+      this.submitCaptureTimeoutId = null
+    }
+  }
+
+  /**
+   * Called when the browser module observes the user submit a question
+   * (Enter / send button), before any response exists. Replaces waiting on
+   * the blind periodic captureIntervalMs tick with an event-driven capture
+   * fired as soon as the response actually completes.
+   *
+   * isResponseComplete is supplied by the caller (LLMChatbotBrowserModule),
+   * which already owns the per-platform parser and its completion selectors
+   * -- this module has no parser of its own and should not fork a second
+   * copy of those selectors.
+   *
+   * Two independent detection paths run concurrently, plus a hard timeout:
+   *   1. MutationObserver -- fast path, fires as soon as the completing
+   *      mutation happens. Not relied on alone: if the observer is armed
+   *      after the DOM has already settled (same-tick render) or the
+   *      configured completion selectors are stale/wrong, it may never see
+   *      a matching mutation at all.
+   *   2. A plain poll on its own timer (SUBMIT_CAPTURE_POLL_MS) -- does not
+   *      depend on any DOM mutation firing, so it still catches completion
+   *      even if the observer never triggers.
+   *   3. A hard timeout ceiling (SUBMIT_CAPTURE_TIMEOUT_MS) -- captures
+   *      whatever is on the page even if isResponseComplete never returns
+   *      true, so a broken/stale completion selector degrades to "capture
+   *      once at timeout" rather than "never capture." The existing
+   *      periodic 45s interval keeps running independently of all of this,
+   *      as an unrelated second safety net.
+   *
+   * A generation counter invalidates any previous watch when a new question
+   * is submitted before the prior one resolved, so an in-flight turn cannot
+   * fire a capture for a later turn.
+   */
+  public triggerQuestionSubmitCapture(platform: string, isResponseComplete: () => boolean): void {
+    if (!this.enabled) {
+      return
+    }
+    const { enabled } = this.isPlatformEnabled(platform)
+    if (!enabled) {
+      return
+    }
+
+    this.stopSubmitCaptureWatch()
+    const generation = ++this.submitCaptureGeneration
+
+    const finish = (reason: string): void => {
+      if (generation !== this.submitCaptureGeneration) {
+        return // superseded by a later submit; do not act on stale state
+      }
+      this.stopSubmitCaptureWatch()
+      console.log('[Page HTML Capture] Submit-triggered capture firing:', { platform, reason })
+      void this.captureAndSend(platform, false)
+    }
+
+    const checkNow = (): boolean => {
+      let complete = false
+      try {
+        complete = isResponseComplete()
+      } catch (error) {
+        console.warn('[Page HTML Capture] isResponseComplete check failed:', error)
+      }
+      if (complete) {
+        finish('completion-signal')
+      }
+      return complete
+    }
+
+    // Immediate check in case the answer already rendered before this was
+    // called (e.g. a fast cached response, or arming after the fact).
+    if (checkNow()) {
+      return
+    }
+
+    this.submitCaptureObserver = new MutationObserver(() => {
+      checkNow()
+    })
+    this.submitCaptureObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+    })
+
+    this.submitCapturePollId = setInterval(() => {
+      checkNow()
+    }, this.SUBMIT_CAPTURE_POLL_MS)
+
+    this.submitCaptureTimeoutId = setTimeout(() => {
+      finish('timeout-ceiling')
+    }, this.SUBMIT_CAPTURE_TIMEOUT_MS)
+
+    console.log('[Page HTML Capture] Armed submit-triggered capture watch for', platform)
   }
 
   private async maybeCapturePeriodicFullPageSnapshots(platform: string): Promise<void> {
@@ -913,6 +1029,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       console.log('[Page HTML Capture] Capture stopped')
     }
     this.stopPeriodicFullPageCapture()
+    this.stopSubmitCaptureWatch()
   }
 
   private handleVisibilityChange(): void {
