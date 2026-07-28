@@ -221,7 +221,6 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
   private readonly DEFAULT_STALE_THRESHOLD_MS = 60 * 60 * 1000 // 1 hour
   private cleanupIntervalId: NodeJS.Timeout | null = null
   private dedupState: DedupState = { lastEmittedAtMs: 0, lastFingerprintByIdentifier: new Map() }
-  private appConfiguration: any = null // eslint-disable-line @typescript-eslint/no-explicit-any
 
   constructor(config?: PageHtmlCaptureStorageConfig) {
     super()
@@ -243,8 +242,6 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
       return
     }
 
-    this.loadConfiguration()
-
     this.cleanupIntervalId = setInterval(() => {
       this.pruneStaleCaptures()
     }, 5 * 60 * 1000)
@@ -252,17 +249,18 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
     console.log('[Page HTML Capture] Service Worker module ready')
   }
 
-  refreshConfiguration(): void {
-    this.loadConfiguration()
-  }
-
-  private loadConfiguration(): void {
-    chrome.storage.local.get('REXConfiguration', (result) => {
-      const configuration = result?.REXConfiguration
-      if (configuration) {
-        this.appConfiguration = configuration
-      }
-    })
+  /**
+   * Config is not cached: refreshConfiguration() broadcasts are not
+   * guaranteed to fire on every config update path (e.g. news_eval's own
+   * validated-refresh flow writes to storage directly without notifying
+   * other modules), so a cached copy can go silently stale. Reading
+   * chrome.storage.local fresh on every dispatch guarantees the latest
+   * config is always used, at the cost of one extra storage read per
+   * capture -- negligible next to the capture payload itself.
+   */
+  private async fetchLatestConfiguration(): Promise<any> { // eslint-disable-line @typescript-eslint/no-explicit-any
+    const result = await chrome.storage.local.get('REXConfiguration')
+    return result?.REXConfiguration ?? null
   }
 
   handleMessage(message: any, sender: any, sendResponse: (response: any) => void): boolean { // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -383,10 +381,17 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
       return
     }
 
-    const configuration = this.appConfiguration
+    const configuration = await this.fetchLatestConfiguration()
     const captureType = typeof capture.captureType === 'string' ? capture.captureType : 'qa'
 
     if (!shouldDispatchCapture(captureUrl, configuration, { captureType, platform: capture.platform ?? null })) {
+      console.log('[Page HTML Capture] Dispatch skipped (host/platform not enabled or configuration unavailable).', {
+        url: captureUrl,
+        captureType,
+        platform: capture.platform ?? null,
+        hasConfiguration: configuration !== null,
+        hasLlmCapturePlatforms: Boolean(configuration?.llm_capture?.platforms),
+      })
       return
     }
 

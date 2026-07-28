@@ -755,6 +755,11 @@ class LLMChatbotBrowserModule extends REXClientModule {
     // whether a matching mutation was observed, so a same-tick render still
     // gets picked up instead of waiting on the (slower, less reliable) full
     // retry-count/mutation cycle.
+    // 900ms matches page_html_capture's own sourceCapture.panelWaitMs default and
+    // the wait used by scripts/live-selector-audit.mjs, which reliably observes
+    // Gemini's side-panel render completing. The previous 300ms value was too
+    // short for that panel's open animation, so this pass consistently found
+    // zero detail anchors and had to fall through to the slower retry cycle.
     pendingEntry.turnRetryFallbackTimer = setTimeout(() => {
       const latestPendingEntry = this.pendingSourcesExtraction.get(prefixKey)
       if (!latestPendingEntry || latestPendingEntry.turnRetryObserver !== observer) {
@@ -763,7 +768,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
       this.disconnectTurnRetryObserver(latestPendingEntry)
       console.log('[LLM Chatbot Browser] Turn-scoped source retry fallback timer fired for pending response')
       this.promoteReadyResponses('turn-retry')
-    }, 300)
+    }, 900)
 
     console.log('[LLM Chatbot Browser] Armed turn-scoped source retry for pending response')
   }

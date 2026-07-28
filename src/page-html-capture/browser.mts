@@ -288,12 +288,29 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
     const platformConfig = this.config?.platformConfigs?.[platform]
     if (platformConfig?.containerSelector) {
       const selectors = platformConfig.containerSelector.split(',').map(s => s.trim())
+      let narrowestMatch: Element | null = null
+      let narrowestSelector: string | null = null
+      let narrowestSize = Infinity
       for (const selector of selectors) {
         const container = document.querySelector(selector)
-        if (container) {
-          console.log('[Page HTML Capture] Found container via containerSelector:', selector)
-          return container
+        if (!container) {
+          continue
         }
+        // Comma-separated containerSelector entries are alternatives, not a priority
+        // order — a broad app-shell selector (e.g. "main") listed before a tighter
+        // one (e.g. ".scrollable-container") would otherwise always win just because
+        // it comes first, even though both match. Prefer whichever match has the
+        // smallest DOM footprint so the scoped Q&A container wins over the app shell.
+        const size = container.querySelectorAll('*').length
+        if (size < narrowestSize) {
+          narrowestMatch = container
+          narrowestSelector = selector
+          narrowestSize = size
+        }
+      }
+      if (narrowestMatch) {
+        console.log('[Page HTML Capture] Found container via containerSelector:', narrowestSelector)
+        return narrowestMatch
       }
     }
 
