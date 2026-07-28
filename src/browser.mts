@@ -601,14 +601,28 @@ class LLMChatbotBrowserModule extends REXClientModule {
         if (event.key !== 'Enter' || event.shiftKey) {
           return
         }
-        const target = event.target as Element | null
-        if (!target || !promptInputSelector || !target.closest(promptInputSelector)) {
+        // IME composition (Japanese/Chinese/Korean input) also delivers
+        // key === 'Enter' when the user is confirming a candidate, not
+        // submitting the message. Without this guard that would dispatch a
+        // false chatbot-question event for partial, mid-composition text.
+        if (event.isComposing) {
           return
         }
-        const content = this.getPromptSubmitText(target)
-        // Read on next tick: some editors (Lexical/ProseMirror) still hold the
-        // pre-submit DOM text at keydown time but clear it synchronously after;
-        // capturing here (before that clear) is what we want.
+        const target = event.target as Element | null
+        const container = target && promptInputSelector ? target.closest(promptInputSelector) : null
+        if (!container) {
+          return
+        }
+        // Read from the matched container, not event.target: for
+        // contenteditable editors (ProseMirror/Lexical/Quill) the actual
+        // keydown target is often a nested <p>/<span> at the caret position,
+        // and reading its textContent alone would silently truncate a
+        // multi-line prompt to just that one node.
+        //
+        // Capturing in the capture phase (the `true` 3rd arg below) means
+        // this runs before the platform's own bubble-phase submit handler
+        // clears the input, so the pre-submit text is still present here.
+        const content = this.getPromptSubmitText(container)
         this.dispatchQuestionSubmitted(content)
       },
       true,

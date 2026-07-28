@@ -484,13 +484,16 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
    *   3. A hard timeout ceiling (SUBMIT_CAPTURE_TIMEOUT_MS) -- captures
    *      whatever is on the page even if isResponseComplete never returns
    *      true, so a broken/stale completion selector degrades to "capture
-   *      once at timeout" rather than "never capture." The existing
-   *      periodic 45s interval keeps running independently of all of this,
-   *      as an unrelated second safety net.
+   *      once at timeout" rather than "never capture." The separate
+   *      periodic full-page-fallback interval (for when the scoped Q&A
+   *      container cannot be resolved at all) still runs independently of
+   *      this; there is no longer a blind periodic QA capture.
    *
    * A generation counter invalidates any previous watch when a new question
    * is submitted before the prior one resolved, so an in-flight turn cannot
-   * fire a capture for a later turn.
+   * fire a capture for a later turn. A resolved flag additionally guards
+   * against the observer, poll, and timeout all being pending at once and
+   * more than one of them calling finish() for the same watch.
    */
   public triggerQuestionSubmitCapture(platform: string, isResponseComplete: () => boolean): void {
     if (!this.enabled) {
@@ -503,11 +506,21 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
 
     this.stopSubmitCaptureWatch()
     const generation = ++this.submitCaptureGeneration
+    let resolved = false
 
     const finish = (reason: string): void => {
-      if (generation !== this.submitCaptureGeneration) {
-        return // superseded by a later submit; do not act on stale state
+      // Guards two distinct races: (a) generation check -- a later submit
+      // superseded this watch entirely; (b) resolved flag -- the observer,
+      // poll, and timeout can all be pending at once, so more than one path
+      // can call finish() for the *same* watch (e.g. the poll fires in the
+      // same tick a queued mutation callback also resolves). Without the
+      // resolved flag, stopSubmitCaptureWatch() no-ops the second time
+      // (everything is already null/cleared) but captureAndSend() would
+      // still run twice.
+      if (generation !== this.submitCaptureGeneration || resolved) {
+        return
       }
+      resolved = true
       this.stopSubmitCaptureWatch()
       console.log('[Page HTML Capture] Submit-triggered capture firing:', { platform, reason })
       void this.captureAndSend(platform, false)

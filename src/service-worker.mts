@@ -126,6 +126,9 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
    * handleInteractionBatch, which still carries the response content/sources.
    */
   private handleQuestionSubmitted(question: any): void { // eslint-disable-line @typescript-eslint/no-explicit-any
+    if (!this.enabled) {
+      return
+    }
     if (!question || typeof question.content !== 'string' || question.content.trim().length === 0) {
       return
     }
