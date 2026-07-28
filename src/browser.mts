@@ -102,7 +102,14 @@ class LLMChatbotBrowserModule extends REXClientModule {
   private questionSubmitListenersInstalled = false
   private lastSubmittedQuestionKey: string | null = null
   private lastSubmittedQuestionAtMs = 0
-  private readonly QUESTION_SUBMIT_DEDUPE_MS = 2000
+  // Deliberately short: this only exists to collapse one physical submit
+  // action firing through both the keydown and click listeners (e.g. Enter
+  // triggering a framework handler that also synthesizes a click on the send
+  // button for the same keypress) -- that pairing lands within tens of ms.
+  // A real second submit of identical text (double-clicking send, or
+  // intentionally re-asking the same short prompt) must never be swallowed
+  // by this, so the window stays far below human reaction time.
+  private readonly QUESTION_SUBMIT_DEDUPE_MS = 250
   private readonly PROMPT_SUBMIT_DEFAULTS: Record<string, {
     promptInputCandidates: string[]
     submitAction: 'enter' | 'click'
@@ -572,8 +579,17 @@ class LLMChatbotBrowserModule extends REXClientModule {
     // resolve). The parser already owns isResponseComplete/its selectors;
     // page-html-capture has no parser of its own, so the check is passed in
     // rather than duplicated there.
-    if (payload.source !== 'unknown' && typeof this.parser?.isResponseComplete === 'function') {
-      pageCaptureModule.triggerQuestionSubmitCapture(payload.source, () => this.parser.isResponseComplete())
+    //
+    // Always arm the watch, even without a usable parser/isResponseComplete:
+    // there is no longer a periodic QA capture, so failing to arm here would
+    // mean this turn is never captured at all rather than merely captured
+    // late (at the timeout ceiling). () => false is a safe no-op check that
+    // still lets the timeout ceiling fire.
+    if (payload.source !== 'unknown') {
+      const isResponseComplete = typeof this.parser?.isResponseComplete === 'function'
+        ? () => this.parser.isResponseComplete()
+        : () => false
+      pageCaptureModule.triggerQuestionSubmitCapture(payload.source, isResponseComplete)
     }
   }
 

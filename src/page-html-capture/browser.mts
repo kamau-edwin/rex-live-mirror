@@ -491,9 +491,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
    *
    * A generation counter invalidates any previous watch when a new question
    * is submitted before the prior one resolved, so an in-flight turn cannot
-   * fire a capture for a later turn. A resolved flag additionally guards
-   * against the observer, poll, and timeout all being pending at once and
-   * more than one of them calling finish() for the same watch.
+   * fire a capture for a later turn.
    */
   public triggerQuestionSubmitCapture(platform: string, isResponseComplete: () => boolean): void {
     if (!this.enabled) {
@@ -506,24 +504,28 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
 
     this.stopSubmitCaptureWatch()
     const generation = ++this.submitCaptureGeneration
-    let resolved = false
 
     const finish = (reason: string): void => {
-      // Guards two distinct races: (a) generation check -- a later submit
-      // superseded this watch entirely; (b) resolved flag -- the observer,
-      // poll, and timeout can all be pending at once, so more than one path
-      // can call finish() for the *same* watch (e.g. the poll fires in the
-      // same tick a queued mutation callback also resolves). Without the
-      // resolved flag, stopSubmitCaptureWatch() no-ops the second time
-      // (everything is already null/cleared) but captureAndSend() would
-      // still run twice.
-      if (generation !== this.submitCaptureGeneration || resolved) {
+      // Guards against a later submit having superseded this watch entirely.
+      // A second finish() call for the *same* watch is not possible here:
+      // stopSubmitCaptureWatch() below synchronously disconnects the
+      // observer (which discards any already-queued mutation records) and
+      // clears the poll/timeout, and JS's run-to-completion semantics mean
+      // no other callback can be mid-execution while this one runs.
+      if (generation !== this.submitCaptureGeneration) {
         return
       }
-      resolved = true
       this.stopSubmitCaptureWatch()
       console.log('[Page HTML Capture] Submit-triggered capture firing:', { platform, reason })
-      void this.captureAndSend(platform, false)
+      // isFinal: true -- this is a deliberate, once-per-turn, high-value
+      // capture, not a frequent poll. Passing false would subject it to the
+      // 1s cross-caller throttle (shared with the full-page-fallback
+      // interval and the visibility-change flush) and the QA
+      // unchanged-fingerprint skip, either of which could silently drop
+      // exactly the capture we most want -- the completed answer. true
+      // also lets the full-page fallback actually run here if the scoped
+      // container cannot be resolved, instead of silently no-op'ing.
+      void this.captureAndSend(platform, true)
     }
 
     const checkNow = (): boolean => {

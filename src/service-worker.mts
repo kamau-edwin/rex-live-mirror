@@ -126,9 +126,13 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
    * handleInteractionBatch, which still carries the response content/sources.
    */
   private handleQuestionSubmitted(question: any): void { // eslint-disable-line @typescript-eslint/no-explicit-any
-    if (!this.enabled) {
-      return
-    }
+    // No this.enabled gate here: this.enabled is set asynchronously inside
+    // setup()'s chrome.storage.local.get callback, with no ordering
+    // guarantee against the very first llmQuestionSubmitted message -- a
+    // freshly woken service worker can receive this message before that
+    // callback has resolved. Every other handler in this file has the same
+    // shape (no enabled check), so this stays consistent rather than
+    // silently dropping a legitimate first question on a race.
     if (!question || typeof question.content !== 'string' || question.content.trim().length === 0) {
       return
     }
