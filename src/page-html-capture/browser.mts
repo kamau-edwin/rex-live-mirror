@@ -434,6 +434,18 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       return
     }
 
+    // Full-page capture is a last resort: only run it when the scoped Q&A
+    // container can't currently be resolved. When containerSelector (or the
+    // legacy snapshotSelectors ancestor search) is matching fine, there is no
+    // need to also ship the entire raw document on this interval.
+    if (this.resolveCaptureRoot(platform)) {
+      state.lastCheckedAtMs = now
+      console.log('[Page HTML Capture] Skipping periodic full-page capture - scoped Q&A container is resolving fine', {
+        platform,
+      })
+      return
+    }
+
     const pageHtml = await this.captureFullPageFromTabWithRetries()
     if (!pageHtml) {
       state.lastCheckedAtMs = now
