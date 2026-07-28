@@ -97,6 +97,64 @@ class LLMChatbotBrowserModule extends REXClientModule {
   private readonly CHECKPOINT_TTL_MS = 8 * 60 * 60 * 1000     // 8 hours
   private readonly CHECKPOINT_MAX_KEYS = 500
 
+  // Submit-time question capture — dispatched immediately on submit, independent
+  // of the response-paired chatbot-interaction pipeline above.
+  private questionSubmitListenersInstalled = false
+  private lastSubmittedQuestionKey: string | null = null
+  private lastSubmittedQuestionAtMs = 0
+  private readonly QUESTION_SUBMIT_DEDUPE_MS = 2000
+  private readonly PROMPT_SUBMIT_DEFAULTS: Record<string, {
+    promptInputCandidates: string[]
+    submitAction: 'enter' | 'click'
+    sendButtonCandidates?: string[]
+  }> = {
+    perplexity: {
+      promptInputCandidates: [
+        '#ask-input',
+        'div[role="textbox"][contenteditable="true"]',
+        '[data-lexical-editor="true"]',
+        'textarea[placeholder*="Ask" i]',
+        'textarea[placeholder*="Search" i]',
+        'textarea',
+      ],
+      submitAction: 'enter',
+    },
+    chatgpt: {
+      promptInputCandidates: [
+        'form[data-type="unified-composer"] [contenteditable="true"]',
+        'textarea[name="prompt-textarea"]',
+        'textarea[aria-label="Chat with ChatGPT"]',
+        'textarea[placeholder*="Ask" i]',
+        '#prompt-textarea',
+        'div[id="prompt-textarea"]',
+        'div[contenteditable="true"][data-testid]',
+        'textarea[data-testid]',
+      ],
+      submitAction: 'click',
+      sendButtonCandidates: [
+        'button[data-testid="send-button"]',
+        'button[aria-label*="Send" i]',
+      ],
+    },
+    gemini: {
+      promptInputCandidates: [
+        '.ql-editor[contenteditable="true"]',
+        'rich-textarea .ql-editor',
+        'div[aria-label*="Enter a prompt" i][contenteditable]',
+        'textarea[aria-label*="prompt" i]',
+      ],
+      submitAction: 'enter',
+    },
+    claude: {
+      promptInputCandidates: [
+        'div[contenteditable="true"][enterkeyhint="enter"]',
+        'div.ProseMirror[contenteditable="true"]',
+        'textarea[placeholder*="Talk to Claude" i]',
+      ],
+      submitAction: 'enter',
+    },
+  }
+
   constructor() {
     super()
     console.log('[LLM Chatbot Browser] Constructor called on:', window.location.href)
@@ -448,10 +506,126 @@ class LLMChatbotBrowserModule extends REXClientModule {
         }
         
         this.loadCaptureCheckpoint().then(() => this.startCapture())
+        this.installQuestionSubmitCapture()
       }
     } catch (error) {
       console.error('[LLM Chatbot Browser] Error initializing chatbot capture:', error)
     }
+  }
+
+  private getPromptSubmitText(target: Element): string {
+    if (target instanceof HTMLTextAreaElement) {
+      return target.value ?? ''
+    }
+    return (target.textContent ?? '').replace(/\s+/g, ' ').trim()
+  }
+
+  private dispatchQuestionSubmitted(content: string): void {
+    const trimmed = content.trim()
+    if (!trimmed) {
+      return
+    }
+
+    // Guard against firing twice for the same submit (e.g. Enter keydown plus a
+    // synthetic click both observed for the same action).
+    const now = Date.now()
+    const dedupeKey = `${trimmed.slice(0, this.PREFIX_LENGTH)}`
+    if (
+      dedupeKey === this.lastSubmittedQuestionKey &&
+      now - this.lastSubmittedQuestionAtMs < this.QUESTION_SUBMIT_DEDUPE_MS
+    ) {
+      return
+    }
+    this.lastSubmittedQuestionKey = dedupeKey
+    this.lastSubmittedQuestionAtMs = now
+
+    const payload = {
+      source: this.parser?.name || 'unknown',
+      url: window.location.href,
+      conversation_id: this.getEffectiveConversationId() ?? null,
+      submitted_at_ms: now,
+      content: trimmed,
+      length: trimmed.length,
+    }
+
+    console.log('[LLM Chatbot Browser] Question submitted, dispatching immediately:', {
+      source: payload.source,
+      length: payload.length,
+      conversation_id: payload.conversation_id,
+    })
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(chrome.runtime.sendMessage as any)(
+      { messageType: 'llmQuestionSubmitted', question: payload },
+      () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const lastError = (chrome.runtime as any).lastError
+        if (lastError) {
+          console.warn('[LLM Chatbot Browser] Failed to send llmQuestionSubmitted:', lastError.message || lastError)
+        }
+      },
+    )
+  }
+
+  private installQuestionSubmitCapture(): void {
+    if (this.questionSubmitListenersInstalled) {
+      return
+    }
+
+    const platformKey = this.parser?.name
+    const defaults = platformKey ? this.PROMPT_SUBMIT_DEFAULTS[platformKey] : undefined
+    if (!defaults) {
+      console.log('[LLM Chatbot Browser] No prompt-submit selectors known for platform; skipping immediate question capture:', platformKey)
+      return
+    }
+
+    const promptInputSelector = defaults.promptInputCandidates.join(', ')
+    const sendButtonSelector = (defaults.sendButtonCandidates || []).join(', ')
+
+    // Delegated listeners on document survive the page's own re-renders of the
+    // input/button elements (SPA re-mounts), unlike listeners bound directly to
+    // the current element instances.
+    document.addEventListener(
+      'keydown',
+      (event) => {
+        if (event.key !== 'Enter' || event.shiftKey) {
+          return
+        }
+        const target = event.target as Element | null
+        if (!target || !promptInputSelector || !target.closest(promptInputSelector)) {
+          return
+        }
+        const content = this.getPromptSubmitText(target)
+        // Read on next tick: some editors (Lexical/ProseMirror) still hold the
+        // pre-submit DOM text at keydown time but clear it synchronously after;
+        // capturing here (before that clear) is what we want.
+        this.dispatchQuestionSubmitted(content)
+      },
+      true,
+    )
+
+    if (defaults.submitAction === 'click' && sendButtonSelector) {
+      document.addEventListener(
+        'click',
+        (event) => {
+          const target = event.target as Element | null
+          const button = target?.closest(sendButtonSelector)
+          if (!button) {
+            return
+          }
+          const input = promptInputSelector ? document.querySelector(promptInputSelector) : null
+          if (!input) {
+            return
+          }
+          const content = this.getPromptSubmitText(input)
+          this.dispatchQuestionSubmitted(content)
+        },
+        true,
+      )
+    }
+
+    this.questionSubmitListenersInstalled = true
+    console.log('[LLM Chatbot Browser] Installed submit-time question capture for platform:', platformKey)
   }
 
   private isGeminiCaptureEligiblePath(path: string, geminiConfig?: any): boolean { // eslint-disable-line @typescript-eslint/no-explicit-any

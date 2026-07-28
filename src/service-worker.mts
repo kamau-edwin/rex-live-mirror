@@ -111,8 +111,40 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
           })
         return true  // Async response
       }
+    } else if (message.messageType === 'llmQuestionSubmitted') {
+      this.handleQuestionSubmitted(message.question)
+      sendResponse({ success: true })
+      return true
     }
     return false
+  }
+
+  /**
+   * Dispatch a standalone PDK event for a question the instant it is submitted,
+   * independent of whether a response ever arrives or completes. This is
+   * separate from the paired chatbot-interaction event dispatched later in
+   * handleInteractionBatch, which still carries the response content/sources.
+   */
+  private handleQuestionSubmitted(question: any): void { // eslint-disable-line @typescript-eslint/no-explicit-any
+    if (!question || typeof question.content !== 'string' || question.content.trim().length === 0) {
+      return
+    }
+
+    dispatchEvent({
+      name: 'pdk-app-event',
+      event_name: 'chatbot-question',
+      generatorId: 'chatbot-question',
+      chatbot_name: question.source ?? 'unknown',
+      question: {
+        url: question.url ?? null,
+        conversation_id: question.conversation_id ?? null,
+        submitted_at_ms: question.submitted_at_ms ?? null,
+        content: question.content,
+        length: question.length ?? question.content.length,
+      },
+    })
+
+    console.log('[LLM Chatbot] Dispatched chatbot-question for', question.source, '(conversation:', question.conversation_id, ')')
   }
 
   /**
