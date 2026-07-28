@@ -80,7 +80,6 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
   private enabled: boolean = false
   private config: PageHtmlCaptureConfig | null = null
   private appConfiguration: AppConfiguration | null = null
-  private captureIntervalId: NodeJS.Timeout | null = null
   private periodicFullPageCaptureIntervalId: NodeJS.Timeout | null = null
   private captureSequence: number = 0
   private interactionCorrelationId: string | null = null // Link captures to interactions
@@ -400,31 +399,31 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       return
     }
 
-    const { enabled, intervalMs } = this.isPlatformEnabled(platform)
+    const { enabled } = this.isPlatformEnabled(platform)
     if (!enabled) {
       console.log('[Page HTML Capture] Platform not enabled:', platform)
       return
     }
 
-    console.log('[Page HTML Capture] Starting periodic capture on', platform, 'interval:', intervalMs)
+    console.log('[Page HTML Capture] Starting event-driven capture on', platform)
 
-    this.stopCapture()
     this.stopPeriodicFullPageCapture()
 
-    // Capture immediately
-    this.captureAndSend(platform, false)
-
-    // Then periodically
-    this.captureIntervalId = setInterval(() => {
-      this.captureAndSend(platform, false)
-    }, intervalMs)
-
+    // No blind periodic QA capture and no immediate capture here: with no
+    // question submitted yet, there is nothing to capture. QA captures are
+    // now driven entirely by triggerQuestionSubmitCapture(), called the
+    // instant a question is submitted (see LLMChatbotBrowserModule). Note
+    // this deliberately does not call stopSubmitCaptureWatch() -- a watch
+    // already armed for an in-flight turn (e.g. from before a visibility
+    // change) must survive a restart of this method.
     if (this.isFullPageFallbackEnabled(platform)) {
       this.startPeriodicFullPageCapture(platform)
     }
   }
 
   private startPeriodicFullPageCapture(platform: string): void {
+    this.stopPeriodicFullPageCapture()
+
     const intervalMs = Math.max(
       this.config?.platformConfigs?.[platform]?.intervalMs
         ?? this.config?.platformConfigs?.[platform]?.captureIntervalMs
@@ -1023,13 +1022,9 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
   }
 
   private stopCapture(): void {
-    if (this.captureIntervalId !== null) {
-      clearInterval(this.captureIntervalId)
-      this.captureIntervalId = null
-      console.log('[Page HTML Capture] Capture stopped')
-    }
     this.stopPeriodicFullPageCapture()
     this.stopSubmitCaptureWatch()
+    console.log('[Page HTML Capture] Capture stopped')
   }
 
   private handleVisibilityChange(): void {
@@ -1039,13 +1034,18 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
     }
 
     if (document.hidden) {
-      // Page hidden - stop capture
-      this.stopCapture()
-    } else {
-      // Page visible - resume capture if not already running
-      if (this.captureIntervalId === null) {
-        this.startCapture()
-      }
+      // Page hidden - stop the full-page fallback interval, but deliberately
+      // leave a submit-triggered watch running: a response can keep
+      // rendering (and its completion selector still fire) while the tab is
+      // backgrounded, and losing that watch would silently drop the capture
+      // for this turn until the next question is submitted.
+      this.stopPeriodicFullPageCapture()
+    } else if (this.isFullPageFallbackEnabled(platform)) {
+      // Page visible again - re-arm the full-page fallback interval if it was
+      // stopped above. startPeriodicFullPageCapture clears any prior interval
+      // before setting a new one, so calling it again here is safe even if
+      // it was never stopped (e.g. this is the very first visibility event).
+      this.startPeriodicFullPageCapture(platform)
     }
   }
 
