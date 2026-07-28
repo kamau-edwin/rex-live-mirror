@@ -263,6 +263,25 @@ export class ChatGPTParser {
       return matches.length > 0 ? matches[matches.length - 1] : null
     }
 
+    // ChatGPT renders a trailing empty placeholder div matching the assistant
+    // message selector after the real response (data-conversation-screenshot-content
+    // with no text, likely a pre-rendered slot for the next turn). Taking the raw
+    // last DOM match lands on that placeholder and the completion check never
+    // sees real content. Walk backwards and skip inert (empty, non-busy) matches
+    // so we land on the actual last response instead.
+    const getLastRealAssistantMessage = (selector: string): Element | null => {
+      const matches = document.querySelectorAll(selector)
+      for (let index = matches.length - 1; index >= 0; index -= 1) {
+        const candidate = matches[index]
+        const isBusy = candidate.getAttribute('aria-busy') === 'true'
+        const hasText = (candidate.textContent || '').trim().length > 0
+        if (isBusy || hasText) {
+          return candidate
+        }
+      }
+      return matches.length > 0 ? matches[matches.length - 1] : null
+    }
+
     if (stopGeneratingSelector && document.querySelector(stopGeneratingSelector)) {
       console.log('[ChatGPTParser] Response still streaming - stop generating button detected')
       return {
@@ -272,7 +291,7 @@ export class ChatGPTParser {
       }
     }
 
-    const latestAssistantMsg = getLastMatchedElement(assistantSelector)
+    const latestAssistantMsg = getLastRealAssistantMessage(assistantSelector)
     if (latestAssistantMsg?.getAttribute('aria-busy') === 'true') {
       console.log('[ChatGPTParser] Response still streaming - aria-busy="true" detected')
       return {
