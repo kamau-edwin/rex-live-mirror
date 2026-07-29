@@ -857,8 +857,13 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
 
       this.updateSourceStability(platform, captureType, pageHtml)
 
-      // Opportunistically capture sources panel if available and conditions met
-      if (!isFinal) {
+      // Opportunistically capture sources panel if available and conditions met.
+      // Perplexity's submit-triggered capture calls this with isFinal: true
+      // (see triggerQuestionSubmitCapture) to bypass the periodic-capture
+      // throttle/dedup, which would otherwise also skip the !isFinal check
+      // below and silently prevent Perplexity's sources click from ever
+      // running. ChatGPT/Gemini keep the original !isFinal gating.
+      if (!isFinal || platform === 'perplexity') {
         void this.captureSourcesIfPossible(platform)
       }
     } catch (error) {
@@ -920,10 +925,29 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       return
     }
 
+    // Perplexity-specific: the stability gate below requires 2+ consecutive
+    // IDENTICAL QA-capture fingerprints before it will ever attempt a click --
+    // a leftover requirement from the old repeating-poll design. QA capture
+    // is now event-driven (once per submitted turn), so that counter can
+    // never reach 2 for any single turn and the click path was permanently
+    // unreachable. For Perplexity, attempt the click on every completed turn
+    // instead: duplicate source links across turns are acceptable and can be
+    // associated back to their originating question during post-analysis.
+    // ChatGPT and Gemini keep the original stability-gated behavior.
+    const isPerplexity = platform === 'perplexity'
     const stableSnapshotCount = sourceCaptureConfig.stableSnapshotCount ?? 2
-    const stabilityDecision = this.shouldAttemptSourcesCapture(platform, stableSnapshotCount)
-    if (!stabilityDecision.ready || !stabilityDecision.fingerprint) {
-      return
+    let expectedFingerprint: string | null
+    if (isPerplexity) {
+      expectedFingerprint = this.getSourceStabilityState(platform).lastQaFingerprint
+      if (!expectedFingerprint) {
+        return
+      }
+    } else {
+      const stabilityDecision = this.shouldAttemptSourcesCapture(platform, stableSnapshotCount)
+      if (!stabilityDecision.ready || !stabilityDecision.fingerprint) {
+        return
+      }
+      expectedFingerprint = stabilityDecision.fingerprint
     }
 
     if (this.isSourceCaptureLocked) {
@@ -953,8 +977,11 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       || toggleBtn.getAttribute('aria-selected') === 'true'
     )
 
-    // Only toggle programmatically when user has been idle
-    if (!isAlreadyOpen && !this.isUserInactive(inactivityThreshold)) {
+    // Only toggle programmatically when user has been idle -- except on
+    // Perplexity, where we deliberately click on every completed turn
+    // regardless of active typing/mouse use, per the "capture every
+    // question's sources" requirement above.
+    if (!isAlreadyOpen && !isPerplexity && !this.isUserInactive(inactivityThreshold)) {
       return
     }
 
@@ -962,7 +989,6 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
 
     try {
       let clickedToOpen = false
-      const expectedFingerprint = stabilityDecision.fingerprint
 
       if (!isAlreadyOpen) {
         toggleBtn.click()
@@ -972,14 +998,23 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
         await new Promise<void>(resolve => { setTimeout(resolve, panelWaitMs) })
 
         // If user resumed activity while we waited, abort without forcing close.
-        // Forcing a close here can race with user intent and flip the panel state.
-        if (!this.isUserInactive(inactivityThreshold)) {
+        // Forcing a close here can race with user intent and flip the panel
+        // state. Perplexity skips this check for the same reason it skips the
+        // inactivity gate above -- capture on every turn takes priority.
+        if (!isPerplexity && !this.isUserInactive(inactivityThreshold)) {
           return
         }
 
-        const recheck = this.shouldAttemptSourcesCapture(platform, stableSnapshotCount)
-        if (!recheck.ready || recheck.fingerprint !== expectedFingerprint) {
-          return
+        if (isPerplexity) {
+          const currentFingerprint = this.getSourceStabilityState(platform).lastQaFingerprint
+          if (currentFingerprint !== expectedFingerprint) {
+            return
+          }
+        } else {
+          const recheck = this.shouldAttemptSourcesCapture(platform, stableSnapshotCount)
+          if (!recheck.ready || recheck.fingerprint !== expectedFingerprint) {
+            return
+          }
         }
 
         // Verify panel appeared (optional — bail gracefully if not)
@@ -1038,14 +1073,30 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
 
       // Close panel only if we were the ones who opened it
       if (clickedToOpen) {
-        const closeSelector = sourceCaptureConfig.sourceCloseSelector
-        const closeBtn = closeSelector
-          ? (document.querySelector(closeSelector) as HTMLElement | null)
-          : null
-        if (closeBtn) {
-          closeBtn.click()
+        if (isPerplexity) {
+          // Perplexity's sources affordance is a Radix tab, not a
+          // collapsible panel: re-clicking the same trigger is a no-op (an
+          // already-selected tab does not deselect itself), and the
+          // configured sourceCloseSelector targets a different UI pattern
+          // (a collapsible sidebar) that does not exist here. Explicitly
+          // switch back to the default answer tab so the participant sees
+          // the answer again, not the Links tab, after every question.
+          const defaultTabBtn = document.querySelector(
+            '[aria-controls$="-content-default"], [id$="-trigger-default"]',
+          ) as HTMLElement | null
+          if (defaultTabBtn) {
+            defaultTabBtn.click()
+          }
         } else {
-          toggleBtn.click() // re-click toggle to collapse
+          const closeSelector = sourceCaptureConfig.sourceCloseSelector
+          const closeBtn = closeSelector
+            ? (document.querySelector(closeSelector) as HTMLElement | null)
+            : null
+          if (closeBtn) {
+            closeBtn.click()
+          } else {
+            toggleBtn.click() // re-click toggle to collapse
+          }
         }
       }
 
