@@ -287,6 +287,9 @@ export class GeminiParser {
       !!document.querySelector('side-bar-sources:not([aria-hidden="true"])') ||
       this.isDialogOpen()
     if (panelOpen) {
+      const closeIcon = document.querySelector('mat-icon[data-mat-icon-name="close"]')
+      const closeIconButton = closeIcon?.closest('button') as HTMLElement | null
+
       const configuredCloseSelector = this.resolveSelector('sourceCloseButton')
       const fallbackCloseSelectors = [
         'side-bar-sources button[data-test-id="close-button"]',
@@ -300,12 +303,12 @@ export class GeminiParser {
         ? [configuredCloseSelector, ...fallbackCloseSelectors]
         : fallbackCloseSelectors
 
-      let closeButton: HTMLElement | null = null
+      let closeButton: HTMLElement | null = closeIconButton
       for (const selector of closeSelectors) {
-        closeButton = document.querySelector(selector) as HTMLElement | null
         if (closeButton) {
           break
         }
+        closeButton = document.querySelector(selector) as HTMLElement | null
       }
 
       if (closeButton) {
@@ -999,25 +1002,21 @@ export class GeminiParser {
         return
       }
 
-      // Confirmed live (2026-07-29): the panel opened via More menu -> View
-      // sources acts as a toggle for that same path -- reopening More menu
-      // and clicking View sources again reliably closes it. Neither the
-      // configured sourceCloseButton selector nor an Escape keypress
-      // actually closed the panel in testing (verified with a real
-      // logged-in session: panel remained open after both attempts), so
-      // this is tried first, not as a last resort.
-      const menuButtonForClose = latestTurnSourceMenuButtons.find(
-        (button): button is HTMLElement => button instanceof HTMLElement,
-      )
-      if (menuButtonForClose) {
-        menuButtonForClose.click()
-        const viewSourcesItemForClose = this.findViewSourcesMenuItem()
-        if (viewSourcesItemForClose) {
-          viewSourcesItemForClose.click()
-          console.log('[GeminiParser] Closed sources panel by reopening More menu -> View sources')
-          return
-        }
-        this.closeTransientMenuOrDialog()
+      // Confirmed live (2026-07-29): the sources panel has a dedicated close
+      // button -- a mat-icon (fonticon="close", data-mat-icon-name="close")
+      // whose enclosing <button> is the actual clickable close control. This
+      // is the real close affordance and is tried first. The earlier
+      // "reopen More menu -> View sources" toggle-close approach was tried
+      // and confirmed NOT to work in automated testing (the reopened menu
+      // did not expose "View sources" as a findable item, and the panel
+      // remained open across repeated live runs), so it is kept only as a
+      // fallback below in case this selector doesn't match some UI variant.
+      const closeIcon = document.querySelector('mat-icon[data-mat-icon-name="close"]')
+      const closeIconButton = closeIcon?.closest('button') as HTMLElement | null
+      if (closeIconButton) {
+        closeIconButton.click()
+        console.log('[GeminiParser] Closed sources panel via mat-icon close button')
+        return
       }
 
       const configuredCloseSelector = this.resolveSelector('sourceCloseButton')
@@ -1045,6 +1044,20 @@ export class GeminiParser {
         closeButton.click()
         console.log('[GeminiParser] Closed sources panel')
         return
+      }
+
+      const menuButtonForClose = latestTurnSourceMenuButtons.find(
+        (button): button is HTMLElement => button instanceof HTMLElement,
+      )
+      if (menuButtonForClose) {
+        menuButtonForClose.click()
+        const viewSourcesItemForClose = this.findViewSourcesMenuItem()
+        if (viewSourcesItemForClose) {
+          viewSourcesItemForClose.click()
+          console.log('[GeminiParser] Closed sources panel by reopening More menu -> View sources')
+          return
+        }
+        this.closeTransientMenuOrDialog()
       }
 
       // Last resort for UI variants where none of the above apply.
