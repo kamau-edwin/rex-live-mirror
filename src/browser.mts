@@ -31,6 +31,7 @@ export interface LLMInteraction {
   turn_number?: number  // 1-based ordinal for this interaction type in the current parsed snapshot
   sources?: (ExtractedSource | ExtractedSourceGroup)[]  // Citation sources extracted from response
   source_extraction?: 'success' | 'failed' | 'none' | 'terminal_empty' | 'data_capture_error' | 'panel_opening_failure'
+  sources_html?: string  // Raw sources-panel HTML, captured alongside extraction (Perplexity only, so far)
   panelCycleConfirmed?: boolean  // MutationObserver validation: did panel open→close?
   panelCycleTimestamp?: { opened: number; closed: number; duration: number }  // Timing proof
 }
@@ -1603,6 +1604,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
         // Extract sources immediately if this is a response (don't wait until transmission)
         let extractedSources: (ExtractedSource | ExtractedSourceGroup)[] = []
         let sourceExtractionState: LLMInteraction['source_extraction'] | undefined = undefined
+        let extractedSourcesHtml: string | undefined = undefined
         if (
           interaction.type === 'response' &&
           typeof this.parser.extractSources === 'function' &&
@@ -1653,6 +1655,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
                 if (this.isPerplexityTerminalSourceResult(extractionResult)) {
                   extractedSources = extractionResult.sources
                   sourceExtractionState = extractionResult.source_extraction
+                  extractedSourcesHtml = extractionResult.sources_html
 
                   const shouldAttemptClose = !!extractionResult.close_panel
                   if (shouldAttemptClose && typeof this.parser.abortSourceExtraction === 'function') {
@@ -1776,6 +1779,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
             turn_number: nextTurnNumber,
             sources: interaction.type === 'response' ? extractedSources : [],
             source_extraction: interaction.type === 'response' ? sourceExtractionState : undefined,
+            sources_html: interaction.type === 'response' ? extractedSourcesHtml : undefined,
           }
           if (newInteraction.type === 'response') {
             pageCaptureModule.setCorrelationId(newId)
@@ -1815,6 +1819,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
             turn_number: nextTurnNumber,
             sources: interaction.type === 'response' ? extractedSources : [],
             source_extraction: interaction.type === 'response' ? sourceExtractionState : undefined,
+            sources_html: interaction.type === 'response' ? extractedSourcesHtml : undefined,
           }
           if (newInteraction.type === 'response') {
             pageCaptureModule.setCorrelationId(newId)

@@ -354,6 +354,11 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
               source_extraction: Array.isArray(interaction.sources) && interaction.sources.length > 0
                 ? (interaction.source_extraction ?? 'success')
                 : 'none',
+              // Raw sources-panel HTML captured alongside extraction
+              // (Perplexity only, so far) -- present in addition to, not
+              // instead of, the separate chatbot-html-snapshot capture with
+              // captureType 'sources'.
+              sources_html: interaction.sources_html ?? null,
             },
           }
 

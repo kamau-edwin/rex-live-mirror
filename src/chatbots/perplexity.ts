@@ -49,6 +49,11 @@ export interface SourceExtractionResult {
   sources: ExtractedSourceGroup[]
   source_extraction: SourceExtractionClassification
   close_panel?: boolean
+  // Raw outerHTML of the sources panel, captured while it was open and
+  // verified populated -- lets chatbot-interaction be enriched with the
+  // sources page HTML directly, without a second, separate click/capture
+  // pass through page-html-capture's own sources-panel mechanism.
+  sources_html?: string
 }
 
 export interface PerplexityConfig {
@@ -864,6 +869,7 @@ export class PerplexityParser {
     const finalizeResult = (
       sources: ExtractedSourceGroup[],
       sourceExtraction: SourceExtractionClassification,
+      sourcesHtml?: string,
     ): SourceExtractionResult => {
       const activePanel = this.findOpenSourcesPanel()
       if (activePanel) {
@@ -879,6 +885,7 @@ export class PerplexityParser {
         sources,
         source_extraction: sourceExtraction,
         close_panel: false,
+        sources_html: sourcesHtml,
       }
     }
 
@@ -1010,7 +1017,11 @@ export class PerplexityParser {
           }
 
           console.log(`[PerplexityParser] Extracted ${sourceGroups.length} source groups after attempt ${attempt}`)
-          return finalizeResult(sourceGroups, 'success')
+          // Capture the panel HTML here, before finalizeResult closes it --
+          // extractionPanel is the same verified, populated panel the
+          // sources above were just parsed from.
+          const sourcesHtml = extractionPanel.outerHTML
+          return finalizeResult(sourceGroups, 'success', sourcesHtml)
         }
       }
 
