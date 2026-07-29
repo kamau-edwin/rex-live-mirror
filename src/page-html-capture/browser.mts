@@ -15,7 +15,15 @@ export interface PageHtmlCaptureConfig {
   platformConfigs?: {
     [platform: string]: {
       enabled: boolean
-      captureIntervalMs: number // How often to capture (e.g., 10000 for 10s)
+      // NOTE: no longer "how often to capture Q&A" -- that capture is now
+      // event-driven, fired from triggerQuestionSubmitCapture() the instant
+      // a question is submitted, not on a timer. This field now only
+      // controls how often maybeCapturePeriodicFullPageSnapshots() re-checks
+      // whether the scoped Q&A container can be resolved at all, and (only
+      // if it still cannot be) re-attempts the full-page-fallback capture.
+      // Kept the same config key name for backward compatibility with
+      // already-deployed backend configs.
+      captureIntervalMs: number
       intervalMs?: number
       emitOnlyOnChange?: boolean
       containerSelector?: string // Primary: container holding Q&A (e.g., div[role='main'], main, chat-window-content)
