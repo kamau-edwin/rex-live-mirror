@@ -999,6 +999,27 @@ export class GeminiParser {
         return
       }
 
+      // Confirmed live (2026-07-29): the panel opened via More menu -> View
+      // sources acts as a toggle for that same path -- reopening More menu
+      // and clicking View sources again reliably closes it. Neither the
+      // configured sourceCloseButton selector nor an Escape keypress
+      // actually closed the panel in testing (verified with a real
+      // logged-in session: panel remained open after both attempts), so
+      // this is tried first, not as a last resort.
+      const menuButtonForClose = latestTurnSourceMenuButtons.find(
+        (button): button is HTMLElement => button instanceof HTMLElement,
+      )
+      if (menuButtonForClose) {
+        menuButtonForClose.click()
+        const viewSourcesItemForClose = this.findViewSourcesMenuItem()
+        if (viewSourcesItemForClose) {
+          viewSourcesItemForClose.click()
+          console.log('[GeminiParser] Closed sources panel by reopening More menu -> View sources')
+          return
+        }
+        this.closeTransientMenuOrDialog()
+      }
+
       const configuredCloseSelector = this.resolveSelector('sourceCloseButton')
       const fallbackCloseSelectors = [
         'side-bar-sources button[data-test-id="close-button"]',
@@ -1026,7 +1047,7 @@ export class GeminiParser {
         return
       }
 
-      // Fallback for UI variants where explicit close button selector changed.
+      // Last resort for UI variants where none of the above apply.
       this.closeTransientMenuOrDialog()
       console.log('[GeminiParser] Attempted to close sources panel via Escape fallback')
     }
