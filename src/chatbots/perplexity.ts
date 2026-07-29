@@ -385,19 +385,6 @@ export class PerplexityParser {
     return /\b\d+\s+sources\b/.test(text) || /\bsources\b/.test(text)
   }
 
-  private getSourceToggleInContainer(container: Element): HTMLElement | null {
-    const toggleSelector = this.resolveSelector('sourceToggleButton')
-    if (!toggleSelector) {
-      return null
-    }
-
-    const candidates = Array.from(container.querySelectorAll(toggleSelector))
-    const matched = candidates.find((candidate) => this.isSourcesToggleButton(candidate))
-    // During early render the toggle text can be empty; keep a structural fallback
-    // so extraction can proceed on a valid configured selector match.
-    return ((matched || candidates[0]) as HTMLElement | undefined) || null
-  }
-
   private getSourceToggleGlobal(): HTMLElement | null {
     const toggleSelector = this.resolveSelector('sourceToggleButton')
     if (!toggleSelector) {
@@ -476,9 +463,12 @@ export class PerplexityParser {
     const activePanel = this.findOpenSourcesPanel()
 
     // When closing the current-turn tabpanel, prefer clicking the Sources toggle
-    // because the UI uses the same control for open/close.
-    if (responseContainer && activePanel) {
-      const toggle = this.getSourceToggleInContainer(responseContainer)
+    // because the UI uses the same control for open/close. Always the
+    // page-level Links tab (see extractSources) -- not a per-turn toggle
+    // inside responseContainer, which can resolve to a different, inline
+    // "sources" button instead.
+    if (activePanel) {
+      const toggle = this.getSourceToggleGlobal()
       if (toggle) {
         toggle.click()
         return
@@ -515,8 +505,8 @@ export class PerplexityParser {
     // This is safe here because closeSourcesPanel is only called from abortSourceExtraction
     // after confirming panelOpenedByParserForResponseId === currentResponseId, meaning we
     // opened the panel and it is currently open on our behalf.
-    if (responseContainer) {
-      const toggle = this.getSourceToggleInContainer(responseContainer)
+    {
+      const toggle = this.getSourceToggleGlobal()
       if (toggle) {
         toggle.click()
         return
@@ -892,16 +882,17 @@ export class PerplexityParser {
     try {
       const maxAttempts = 2
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        let sourceToggle = this.getSourceToggleInContainer(responseContainer)
-        if (!sourceToggle) {
-          // Fallback to document-level toggle (e.g. the Perplexity "Links" header tab
-          // that appears above response containers rather than inside them).
-          const globalToggle = this.getSourceToggleGlobal()
-          if (globalToggle) {
-            console.log('[PerplexityParser] Turn-scoped toggle not found; falling back to document-level toggle (header Links tab)')
-            sourceToggle = globalToggle
-          }
-        }
+        // Always use the page-level Links tab. A per-turn toggle scoped to
+        // responseContainer previously took priority here, but Perplexity
+        // also renders an inline per-turn "sources" button that opens a
+        // separate scrollable dialogue -- a broad aria-label/text match
+        // (any "source(s)" match) could find that button first and click it
+        // instead, leaving the page-level Links tab (and page-html-capture's
+        // already-working click on it) unclicked. Confirmed live:
+        // chatbot-interaction.response.sources was empty while a separate
+        // chatbot-html-snapshot sources capture (which always targets the
+        // page-level tab directly) succeeded in the same test.
+        const sourceToggle = this.getSourceToggleGlobal()
         if (!sourceToggle) {
           if (attempt < maxAttempts) {
             continue
