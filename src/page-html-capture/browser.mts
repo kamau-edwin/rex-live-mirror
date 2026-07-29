@@ -958,30 +958,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       return
     }
 
-    // Perplexity's sourceToggleSelector matches more than one element shape:
-    // the page-level Links tab trigger (one per turn, only one active at a
-    // time) AND a separate inline per-turn "sources" button that opens its
-    // own scrollable dialogue. A plain querySelector (first match in
-    // document order) can return either one -- confirmed live to sometimes
-    // grab the inline button instead of the Links tab. Prefer whichever
-    // candidate is marked active (aria-selected/aria-expanded/data-state),
-    // the same structural signal already used for Perplexity's other
-    // toggle-selection logic in chatbots/perplexity.ts, falling back to the
-    // last DOM match (most recent turn) instead of the first.
-    let toggleBtn: HTMLElement | null
-    if (isPerplexity) {
-      const candidates = Array.from(document.querySelectorAll(sourceCaptureConfig.sourceToggleSelector))
-      const activeCandidate = candidates.find((candidate) => (
-        candidate.getAttribute('aria-selected') === 'true'
-        || candidate.getAttribute('data-state') === 'active'
-        || candidate.getAttribute('aria-expanded') === 'true'
-      ))
-      toggleBtn = (activeCandidate as HTMLElement | undefined)
-        ?? (candidates[candidates.length - 1] as HTMLElement | undefined)
-        ?? null
-    } else {
-      toggleBtn = document.querySelector(sourceCaptureConfig.sourceToggleSelector) as HTMLElement | null
-    }
+    const toggleBtn = document.querySelector(sourceCaptureConfig.sourceToggleSelector) as HTMLElement | null
     if (!toggleBtn) {
       return
     }
@@ -1104,27 +1081,11 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
           // (a collapsible sidebar) that does not exist here. Explicitly
           // switch back to the default answer tab so the participant sees
           // the answer again, not the Links tab, after every question.
-          //
-          // A plain document-wide query for the Answers trigger can match a
-          // DIFFERENT (older) turn's trigger when more than one is present,
-          // since every turn renders its own default/sources tab pair.
-          // toggleBtn is the exact Links trigger just clicked to open this
-          // turn's panel -- its Radix id shares a prefix with this same
-          // turn's Answers trigger (e.g. "radix-_r_2c_-trigger-sources" /
-          // "radix-_r_2c_-trigger-default"), so deriving from it scopes the
-          // return-click to the correct turn instead of guessing.
-          const toggleId = toggleBtn.getAttribute('id') || ''
-          const prefixMatch = toggleId.match(/^(radix-.+?-)trigger-/)
-          const defaultTabBtn = (prefixMatch
-            ? document.querySelector(`[id="${prefixMatch[1]}trigger-default"]`)
-            : document.querySelector('[aria-controls$="-content-default"], [id$="-trigger-default"]')
+          const defaultTabBtn = document.querySelector(
+            '[aria-controls$="-content-default"], [id$="-trigger-default"]',
           ) as HTMLElement | null
           if (defaultTabBtn) {
             defaultTabBtn.click()
-          } else {
-            console.log('[Page HTML Capture] Could not find matching default answer tab to return to', {
-              toggleId,
-            })
           }
         } else {
           const closeSelector = sourceCaptureConfig.sourceCloseSelector

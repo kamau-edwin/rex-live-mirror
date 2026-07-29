@@ -490,24 +490,13 @@ export class PerplexityParser {
   private closeSourcesPanel(responseContainer?: Element): void {
     const activePanel = this.findOpenSourcesPanel()
 
-    // The Links affordance is a Radix tab, not a collapsible panel:
-    // re-clicking the already-active Links trigger is a no-op (an
-    // already-selected tab does not deselect itself), so it never actually
-    // returns to the Answers tab. Click the Answers (-content-default)
-    // trigger that shares the SAME turn's Radix id prefix as the Links
-    // trigger we resolve here, so the correct turn's tab -- not a different,
-    // older turn's -- gets restored.
+    // When closing the current-turn tabpanel, prefer clicking the Sources toggle
+    // because the UI uses the same control for open/close. Always the
+    // page-level Links tab (see extractSources) -- not a per-turn toggle
+    // inside responseContainer, which can resolve to a different, inline
+    // "sources" button instead.
     if (activePanel) {
       const toggle = this.getSourceToggleGlobal()
-      const toggleId = toggle?.getAttribute('id') || ''
-      const prefixMatch = toggleId.match(/^(radix-.+?-)trigger-/)
-      const defaultTab = (prefixMatch
-        ? document.querySelector(`[id="${prefixMatch[1]}trigger-default"]`)
-        : null) as HTMLElement | null
-      if (defaultTab) {
-        defaultTab.click()
-        return
-      }
       if (toggle) {
         toggle.click()
         return
