@@ -76,6 +76,16 @@ export class PerplexityParser {
   private selectorFallbacks: PerplexitySelectorFallbacks
   private selectorValidationError: string | null = null
   private extractedResponseIds = new Set<string>()
+  // extractedResponseIds is only populated at the END of extractSources()
+  // (inside finalizeResult, after several awaited waits). If browser.mts
+  // detects the same response as "new content" twice in quick succession
+  // (e.g. two mutation ticks right as streaming finishes, each still
+  // reading a longer length than last time), a second call can start
+  // before the first has finished and pass the extractedResponseIds check,
+  // racing to click the Links tab toggle a second time. This tracks
+  // extraction as IN PROGRESS synchronously, before any await, so a
+  // concurrent second call for the same response bails out immediately.
+  private inFlightExtractionResponseIds = new Set<string>()
   private panelOpenedByParserForResponseId: string | undefined = undefined
   private responseContainerIds = new Map<Element, string>()
   private responseContainerSequence = 0
@@ -733,6 +743,17 @@ export class PerplexityParser {
 
     const currentResponseId = this.getCurrentResponseId(responseContainer)
 
+    // Synchronous, entry-time guard against a concurrent call for the same
+    // response (see inFlightExtractionResponseIds' declaration for why
+    // extractedResponseIds alone is not enough to prevent this).
+    if (this.inFlightExtractionResponseIds.has(currentResponseId)) {
+      return { sources: [], source_extraction: 'terminal_empty' }
+    }
+    if (this.extractedResponseIds.has(currentResponseId)) {
+      return { sources: [], source_extraction: 'terminal_empty' }
+    }
+    this.inFlightExtractionResponseIds.add(currentResponseId)
+
     // Perplexity has a single page-level sources tab that always reflects
     // the most recently answered turn, so unlike Gemini there is no
     // "different turn's panel is open" case to detect and close here.
@@ -901,6 +922,8 @@ export class PerplexityParser {
       sourceExtraction: SourceExtractionClassification,
       sourcesHtml?: string,
     ): SourceExtractionResult => {
+      this.inFlightExtractionResponseIds.delete(currentResponseId)
+
       const activePanel = this.findOpenSourcesPanel()
       if (activePanel) {
         this.closeSourcesPanel(responseContainer)
