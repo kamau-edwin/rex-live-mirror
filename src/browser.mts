@@ -102,6 +102,14 @@ class LLMChatbotBrowserModule extends REXClientModule {
   private questionSubmitListenersInstalled = false
   private lastSubmittedQuestionKey: string | null = null
   private lastSubmittedQuestionAtMs = 0
+  // Continuously updated snapshot of the prompt input's live text (see the
+  // 'input' listener in installQuestionSubmitCapture). Used only as a
+  // fallback when the keydown/click submit handlers read the input and find
+  // it already empty -- some frameworks clear the editor synchronously
+  // before our capture-phase listener's callback body runs, and without
+  // this the whole question would be silently lost rather than recovered
+  // from the last text we saw before submission.
+  private lastKnownPromptText = ''
   // Deliberately short: this only exists to collapse one physical submit
   // action firing through both the keydown and click listeners (e.g. Enter
   // triggering a framework handler that also synthesizes a click on the send
@@ -124,7 +132,16 @@ class LLMChatbotBrowserModule extends REXClientModule {
         'textarea[placeholder*="Search" i]',
         'textarea',
       ],
+      // Both Enter and click are installed regardless of this value (see
+      // installQuestionSubmitCapture) -- it documents the platform's primary
+      // mechanism only. sendButtonCandidates verified live via
+      // scripts/live-selector-audit.mjs's send-button discovery probe
+      // (2026-07-29): button[aria-label*="Submit" i] matched exactly one
+      // element, aria-label="Submit", on the live prompt composer.
       submitAction: 'enter',
+      sendButtonCandidates: [
+        'button[aria-label*="Submit" i]',
+      ],
     },
     chatgpt: {
       promptInputCandidates: [
@@ -150,7 +167,16 @@ class LLMChatbotBrowserModule extends REXClientModule {
         'div[aria-label*="Enter a prompt" i][contenteditable]',
         'textarea[aria-label*="prompt" i]',
       ],
+      // Both Enter and click are installed regardless of this value (see
+      // installQuestionSubmitCapture) -- it documents the platform's primary
+      // mechanism only. sendButtonCandidates verified live via
+      // scripts/live-selector-audit.mjs's send-button discovery probe
+      // (2026-07-29): button[aria-label*="Send" i] matched exactly one
+      // element, aria-label="Send message", on the live prompt composer.
       submitAction: 'enter',
+      sendButtonCandidates: [
+        'button[aria-label*="Send" i]',
+      ],
     },
     claude: {
       promptInputCandidates: [
@@ -533,6 +559,13 @@ class LLMChatbotBrowserModule extends REXClientModule {
       return
     }
 
+    // Clear immediately: lastKnownPromptText exists only to recover text an
+    // already-cleared input can no longer provide. Leaving it set after a
+    // successful dispatch risks resending this same stale text on a later
+    // submit whose own DOM read also comes back empty before the next
+    // 'input' event has a chance to repopulate it.
+    this.lastKnownPromptText = ''
+
     // Guard against firing twice for the same submit (e.g. Enter keydown plus a
     // synthetic click both observed for the same action).
     const now = Date.now()
@@ -643,6 +676,30 @@ class LLMChatbotBrowserModule extends REXClientModule {
     const promptInputSelector = defaults.promptInputCandidates.join(', ')
     const sendButtonSelector = (defaults.sendButtonCandidates || []).join(', ')
 
+    // Continuously track the input's live text so a submit handler that
+    // finds the input already cleared (framework beat us to it) can recover
+    // the last text we saw, instead of silently dispatching/sending nothing.
+    document.addEventListener(
+      'input',
+      (event) => {
+        const target = event.target as Element | null
+        const container = target && promptInputSelector ? target.closest(promptInputSelector) : null
+        if (!container) {
+          return
+        }
+        const text = this.getPromptSubmitText(container)
+        if (text) {
+          this.lastKnownPromptText = text
+        }
+      },
+      true,
+    )
+
+    const readSubmitText = (container: Element): string => {
+      const content = this.getPromptSubmitText(container)
+      return content || this.lastKnownPromptText
+    }
+
     // Delegated listeners on document survive the page's own re-renders of the
     // input/button elements (SPA re-mounts), unlike listeners bound directly to
     // the current element instances.
@@ -673,13 +730,20 @@ class LLMChatbotBrowserModule extends REXClientModule {
         // Capturing in the capture phase (the `true` 3rd arg below) means
         // this runs before the platform's own bubble-phase submit handler
         // clears the input, so the pre-submit text is still present here.
-        const content = this.getPromptSubmitText(container)
-        this.dispatchQuestionSubmitted(content)
+        this.dispatchQuestionSubmitted(readSubmitText(container))
       },
       true,
     )
 
-    if (defaults.submitAction === 'click' && sendButtonSelector) {
+    // Installed whenever a send-button selector is configured, regardless of
+    // the platform's primary submitAction. Enter is the single point of
+    // failure it was before this fix (a framework that intercepts Enter
+    // before it reaches document, or an editor that clears its own text
+    // before we read it, silently drops the whole capture with no
+    // redundancy). ChatGPT already had both paths active; this makes
+    // Gemini and Perplexity structurally match it -- either path alone is
+    // enough to capture the question.
+    if (sendButtonSelector) {
       document.addEventListener(
         'click',
         (event) => {
@@ -692,8 +756,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
           if (!input) {
             return
           }
-          const content = this.getPromptSubmitText(input)
-          this.dispatchQuestionSubmitted(content)
+          this.dispatchQuestionSubmitted(readSubmitText(input))
         },
         true,
       )
