@@ -381,6 +381,12 @@ export class PerplexityParser {
       return true
     }
 
+    // Matches the "N sources" pill variant (a different element shape than
+    // the Links tab trigger below, also covered by the sourceToggleButton
+    // selector list). The Links tab trigger itself has no aria-label and its
+    // text is literally "Links" -- it never matches this, by design; it is
+    // identified structurally instead (aria-controls ending in
+    // "-content-sources"), not by text/label content.
     const text = this.normalizeText(button.textContent).toLowerCase()
     return /\b\d+\s+sources\b/.test(text) || /\bsources\b/.test(text)
   }
@@ -393,8 +399,30 @@ export class PerplexityParser {
     // Searches document-level (not scoped to a turn container) for controls like
     // the Perplexity "Links" header tab that lives outside response containers.
     const candidates = Array.from(document.querySelectorAll(toggleSelector))
+
+    // Perplexity renders one Links-tab trigger button per turn (all matching
+    // aria-controls$="-content-sources"), with only the current turn's
+    // marked active. Confirmed live: an inactive prior turn's trigger has
+    // aria-selected="false"/data-state="inactive"/tabindex="-1" and is
+    // otherwise structurally identical, so text/label content cannot
+    // distinguish them -- only active state can. Prefer that; the "N
+    // sources" pill match and last-in-DOM are both weaker fallbacks for
+    // when no trigger is marked active yet (e.g. very early render).
+    const activeToggle = candidates.find((candidate) => (
+      candidate.getAttribute('aria-selected') === 'true' || candidate.getAttribute('data-state') === 'active'
+    ))
+    if (activeToggle) {
+      return activeToggle as HTMLElement
+    }
+
     const matched = candidates.find((candidate) => this.isSourcesToggleButton(candidate))
-    return ((matched || candidates[0]) as HTMLElement | undefined) || null
+    if (matched) {
+      return matched as HTMLElement
+    }
+
+    // Last, not first: new turns are appended after existing ones in the
+    // DOM, so the most recent turn's trigger is the last candidate.
+    return (candidates[candidates.length - 1] as HTMLElement | undefined) || null
   }
 
   private getVisibleSourceCountSignal(sourceToggle: HTMLElement | null): number {
