@@ -115,6 +115,18 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
   }
 
   async setup(): Promise<void> {
+    // Chrome injects content scripts into every frame matching the host
+    // permissions, including embedded iframes (e.g. Perplexity's
+    // count.perplexity.ai analytics beacon frame). Without this guard, that
+    // frame runs its own independent full-page-fallback interval, wastefully
+    // capturing and sending the iframe's own tiny document every cycle --
+    // it is always rejected downstream (host not in configured platform
+    // hosts), so nothing is lost by skipping it here, only wasted work.
+    if (window.top !== window.self) {
+      console.log('[Page HTML Capture] Skipping initialization in non-top frame')
+      return
+    }
+
     console.log('[Page HTML Capture] Setting up browser module')
 
     try {

@@ -586,10 +586,45 @@ class LLMChatbotBrowserModule extends REXClientModule {
     // late (at the timeout ceiling). () => false is a safe no-op check that
     // still lets the timeout ceiling fire.
     if (payload.source !== 'unknown') {
+      const turnSelector = this.getAssistantTurnContainerSelector()
+      const turnCountAtSubmit = turnSelector ? this.countAssistantTurnContainers(turnSelector) : null
       const isResponseComplete = typeof this.parser?.isResponseComplete === 'function'
-        ? () => this.parser.isResponseComplete()
+        ? () => {
+            // isResponseComplete() checks only the LAST assistant turn
+            // currently in the DOM, with no notion of "since this submit."
+            // On turn 2+, calling it right after submit -- before the new
+            // turn's DOM node exists yet -- can see the PREVIOUS turn's
+            // already-completed response and report true for a turn that
+            // was never actually asked. Require the turn count to have
+            // increased since submit before trusting a true result.
+            //
+            // turnCountAtSubmit is null when no usable turn-container
+            // selector was found at all (missing/misconfigured selector,
+            // not "hasn't grown yet") -- in that case skip this gate
+            // entirely rather than have it permanently block every true
+            // result and silently downgrade every capture to the timeout
+            // ceiling.
+            if (turnCountAtSubmit !== null && this.countAssistantTurnContainers(turnSelector as string) <= turnCountAtSubmit) {
+              return false
+            }
+            return this.parser.isResponseComplete()
+          }
         : () => false
       pageCaptureModule.triggerQuestionSubmitCapture(payload.source, isResponseComplete)
+    }
+  }
+
+  private getAssistantTurnContainerSelector(): string | null {
+    const selector = this.parser?.selectors?.assistantTurnContainer
+      ?? this.parser?.selectors?.responseContainer
+    return typeof selector === 'string' && selector.length > 0 ? selector : null
+  }
+
+  private countAssistantTurnContainers(selector: string): number {
+    try {
+      return document.querySelectorAll(selector).length
+    } catch {
+      return 0
     }
   }
 
