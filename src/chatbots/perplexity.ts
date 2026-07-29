@@ -256,7 +256,7 @@ export class PerplexityParser {
     return questionForTurn ? `${questionForTurn}:${responseContainerId}` : responseContainerId
   }
 
-  private waitForPanelVisible(questionForTurn?: string, timeoutMs: number = 1200): Promise<Element | null> {
+  private waitForPanelVisible(timeoutMs: number = 1200): Promise<Element | null> {
     return new Promise((resolve) => {
       let settled = false
 
@@ -275,7 +275,7 @@ export class PerplexityParser {
       }
 
       const evaluatePanel = () => {
-        const panel = this.findOpenSourcesPanel(questionForTurn)
+        const panel = this.findOpenSourcesPanel()
         if (panel && panel.isConnected && panel.getClientRects().length > 0) {
           finish(panel)
         }
@@ -301,7 +301,6 @@ export class PerplexityParser {
   }
 
   private waitForSourceDetails(
-    questionForTurn: string | undefined,
     sourceDetailSelector: string,
     timeoutMs: number = 1200,
   ): Promise<{ panel: Element | null; detailCount: number }> {
@@ -314,7 +313,7 @@ export class PerplexityParser {
       }
 
       const getSnapshot = (): { panel: Element | null; detailCount: number } => {
-        const panel = this.findOpenSourcesPanel(questionForTurn)
+        const panel = this.findOpenSourcesPanel()
         if (!panel || !panel.isConnected || panel.getClientRects().length === 0) {
           return { panel: null, detailCount: 0 }
         }
@@ -426,60 +425,29 @@ export class PerplexityParser {
     return candidates.filter((panel) => {
       const id = (panel.getAttribute('id') || '').toLowerCase()
       const labelledBy = (panel.getAttribute('aria-labelledby') || '').toLowerCase()
-      const text = this.normalizeText(panel.textContent).toLowerCase()
 
-      return id.includes('citation') || labelledBy.includes('citation') || text.includes('sources for')
+      // Perplexity's current UI (2026-07+) uses "-content-sources" /
+      // "-trigger-sources" ids, not the older "citation" id this originally
+      // matched. Both are checked so a future UI revert does not silently
+      // break this again. Structural (id/aria-labelledby) only -- panel text
+      // is not used for matching since Perplexity has changed its panel
+      // header wording before ("Sources for X" -> "Search results for: X")
+      // and any text-based match is one rewording away from breaking again.
+      return (
+        id.includes('citation') || id.includes('-content-sources')
+        || labelledBy.includes('citation') || labelledBy.includes('-trigger-sources')
+      )
     })
   }
 
-  private getPanelQuestion(panel: Element): string | undefined {
-    const scopedCandidates = Array.from(panel.querySelectorAll('div, span, p'))
-    for (const candidate of scopedCandidates) {
-      const text = this.normalizeText(candidate.textContent)
-      if (!text) {
-        continue
-      }
-
-      const lower = text.toLowerCase()
-      if (!lower.startsWith('sources for ')) {
-        continue
-      }
-
-      return this.normalizeText(text.replace(/^sources\s+for\s+/i, '')) || undefined
-    }
-
-    const panelText = this.normalizeText(panel.textContent)
-    const fallbackMatch = panelText.match(/sources\s+for\s+([^\n]+)/i)
-    if (!fallbackMatch || !fallbackMatch[1]) {
-      return undefined
-    }
-
-    return this.normalizeText(fallbackMatch[1]) || undefined
-  }
-
-  private panelMatchesQuestion(panel: Element, question?: string): boolean {
-    if (!question) {
-      return true
-    }
-
-    const normalizedQuestion = this.normalizeText(question).toLowerCase()
-    if (!normalizedQuestion) {
-      return true
-    }
-
-    const panelQuestion = this.getPanelQuestion(panel)
-    if (!panelQuestion) {
-      return false
-    }
-
-    const normalizedPanelQuestion = this.normalizeText(panelQuestion).toLowerCase()
-    return (
-      normalizedPanelQuestion.includes(normalizedQuestion) ||
-      normalizedQuestion.includes(normalizedPanelQuestion)
-    )
-  }
-
-  private findOpenSourcesPanel(question?: string): Element | null {
+  /**
+   * Perplexity has a single page-level Links/sources tab (not one per turn):
+   * it always reflects whichever question was most recently answered, so
+   * there is no cross-turn ambiguity to resolve here -- unlike Gemini, where
+   * each turn can have its own panel. No turn-matching needed; just find the
+   * one active sources tabpanel.
+   */
+  private findOpenSourcesPanel(): Element | null {
     const sourceDetailAnchorSelector = this.resolveSelector('sourceDetailAnchors')
     const panelCandidates = this.getActiveCitationsPanels()
 
@@ -487,13 +455,6 @@ export class PerplexityParser {
       // Do not infer "panel open" from global citation anchors. Inline citations
       // inside the response body can exist while the sources panel is still closed.
       return null
-    }
-
-    if (question) {
-      const matchForQuestion = panelCandidates.find((panel) => this.panelMatchesQuestion(panel, question))
-      if (matchForQuestion) {
-        return matchForQuestion
-      }
     }
 
     if (sourceDetailAnchorSelector) {
@@ -507,13 +468,11 @@ export class PerplexityParser {
   }
 
   private closeSourcesPanel(responseContainer?: Element): void {
-    const questionForTurn = responseContainer ? this.getQuestionForResponseContainer(responseContainer) : undefined
-    const activePanelForTurn = this.findOpenSourcesPanel(questionForTurn)
-    const activePanelToClose = activePanelForTurn || this.findOpenSourcesPanel()
+    const activePanel = this.findOpenSourcesPanel()
 
     // When closing the current-turn tabpanel, prefer clicking the Sources toggle
     // because the UI uses the same control for open/close.
-    if (responseContainer && activePanelForTurn) {
+    if (responseContainer && activePanel) {
       const toggle = this.getSourceToggleInContainer(responseContainer)
       if (toggle) {
         toggle.click()
@@ -522,8 +481,8 @@ export class PerplexityParser {
     }
 
     const configuredCloseSelector = this.resolveSelector('sourceCloseButton')
-    if (configuredCloseSelector && activePanelToClose) {
-      const closeButton = activePanelToClose.querySelector(configuredCloseSelector) as HTMLElement | null
+    if (configuredCloseSelector && activePanel) {
+      const closeButton = activePanel.querySelector(configuredCloseSelector) as HTMLElement | null
       if (closeButton) {
         closeButton.click()
         return
@@ -537,9 +496,9 @@ export class PerplexityParser {
       'button[aria-label*="dismiss" i]',
     ]
 
-    if (activePanelToClose) {
+    if (activePanel) {
       for (const selector of closeButtonFallbackSelectors) {
-        const fallbackClose = activePanelToClose.querySelector(selector) as HTMLElement | null
+        const fallbackClose = activePanel.querySelector(selector) as HTMLElement | null
         if (fallbackClose) {
           fallbackClose.click()
           return
@@ -738,15 +697,11 @@ export class PerplexityParser {
     }
 
     const currentResponseId = this.getCurrentResponseId(responseContainer)
-    const questionForTurn = this.getQuestionForResponseContainer(responseContainer)
 
-    // If a different turn's sources tabpanel is currently active, close it before
-    // beginning extraction for this turn.
+    // Perplexity has a single page-level sources tab that always reflects
+    // the most recently answered turn, so unlike Gemini there is no
+    // "different turn's panel is open" case to detect and close here.
     const activePanelAtStart = this.findOpenSourcesPanel()
-    if (activePanelAtStart && !this.panelMatchesQuestion(activePanelAtStart, questionForTurn)) {
-      this.closeSourcesPanel(responseContainer)
-      this.panelOpenedByParserForResponseId = undefined
-    }
 
     // Some UI variants expose only close-button signals before tabpanel metadata is
     // available. If that stale panel is left open, the next toggle click can close
@@ -910,8 +865,8 @@ export class PerplexityParser {
       sources: ExtractedSourceGroup[],
       sourceExtraction: SourceExtractionClassification,
     ): SourceExtractionResult => {
-      const activePanelForTurn = this.findOpenSourcesPanel(questionForTurn)
-      if (activePanelForTurn) {
+      const activePanel = this.findOpenSourcesPanel()
+      if (activePanel) {
         this.closeSourcesPanel(responseContainer)
       }
 
@@ -952,7 +907,7 @@ export class PerplexityParser {
         // Only click the toggle if the panel is not already open.
         // On attempt 2, the panel may still be visible from attempt 1's click (sources
         // render slowly); clicking the toggle again would close the already-open panel.
-        const panelAlreadyVisible = !!this.findOpenSourcesPanel(questionForTurn)
+        const panelAlreadyVisible = !!this.findOpenSourcesPanel()
         if (!panelAlreadyVisible) {
           if (!this.panelOpenedByParserForResponseId || this.panelOpenedByParserForResponseId === currentResponseId) {
             sourceToggle.click()
@@ -970,7 +925,7 @@ export class PerplexityParser {
           }
         }
 
-        const sourcePanel = await this.waitForPanelVisible(questionForTurn)
+        const sourcePanel = await this.waitForPanelVisible()
         if (!sourcePanel) {
           if (attempt === maxAttempts) {
             return finalizeResult([], 'panel_opening_failure')
@@ -983,7 +938,7 @@ export class PerplexityParser {
         }
 
         const visibleSourceCountSignal = this.getVisibleSourceCountSignal(sourceToggle)
-        const sourceDetailsSnapshot = await this.waitForSourceDetails(questionForTurn, sourceDetailSelector)
+        const sourceDetailsSnapshot = await this.waitForSourceDetails(sourceDetailSelector)
         const extractionPanel = sourceDetailsSnapshot.panel || sourcePanel
         const rawPanelAnchorCount = sourceDetailsSnapshot.detailCount
         console.log(
