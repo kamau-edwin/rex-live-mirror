@@ -958,7 +958,33 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       return
     }
 
-    const toggleBtn = document.querySelector(sourceCaptureConfig.sourceToggleSelector) as HTMLElement | null
+    // Perplexity's configured sourceToggleSelector includes broader
+    // alternatives that can match elements other than the page-level Links
+    // tab trigger (an inline per-turn "sources" button, a separate "N
+    // sources" favicon pill that opens its own dropdown). Only a real Radix
+    // tab trigger (role="tab" with aria-controls ending in
+    // "-content-sources") should ever be clicked for source capture; a plain
+    // first-match querySelector has no way to guarantee that. Prefer
+    // whichever matching trigger is active (aria-selected/data-state), the
+    // same structural signal used for Perplexity's other toggle-selection
+    // logic in chatbots/perplexity.ts, falling back to the last DOM match
+    // (most recent turn) instead of the first.
+    let toggleBtn: HTMLElement | null
+    if (isPerplexity) {
+      const candidates = Array.from(document.querySelectorAll(sourceCaptureConfig.sourceToggleSelector))
+        .filter((candidate) => (
+          candidate.getAttribute('role') === 'tab'
+          && (candidate.getAttribute('aria-controls') || '').endsWith('-content-sources')
+        ))
+      const activeCandidate = candidates.find((candidate) => (
+        candidate.getAttribute('aria-selected') === 'true' || candidate.getAttribute('data-state') === 'active'
+      ))
+      toggleBtn = (activeCandidate as HTMLElement | undefined)
+        ?? (candidates[candidates.length - 1] as HTMLElement | undefined)
+        ?? null
+    } else {
+      toggleBtn = document.querySelector(sourceCaptureConfig.sourceToggleSelector) as HTMLElement | null
+    }
     if (!toggleBtn) {
       return
     }
@@ -1081,11 +1107,24 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
           // (a collapsible sidebar) that does not exist here. Explicitly
           // switch back to the default answer tab so the participant sees
           // the answer again, not the Links tab, after every question.
-          const defaultTabBtn = document.querySelector(
-            '[aria-controls$="-content-default"], [id$="-trigger-default"]',
-          ) as HTMLElement | null
+          //
+          // toggleBtn is the exact Links trigger just clicked to open this
+          // turn's panel. Its Radix id shares a prefix with this same
+          // turn's Answers trigger (e.g. "radix-_r_2c_-trigger-sources" /
+          // "radix-_r_2c_-trigger-default") -- deriving from it scopes the
+          // return-click to the correct turn instead of a document-wide
+          // query that could match a different, older turn's trigger.
+          const toggleId = toggleBtn.getAttribute('id') || ''
+          const prefixMatch = toggleId.match(/^(radix-.+?-)trigger-/)
+          const defaultTabBtn = (prefixMatch
+            ? document.querySelector(`[role="tab"][id="${prefixMatch[1]}trigger-default"]`)
+            : null) as HTMLElement | null
           if (defaultTabBtn) {
             defaultTabBtn.click()
+          } else {
+            console.log('[Page HTML Capture] Could not find matching default answer tab to return to', {
+              toggleId,
+            })
           }
         } else {
           const closeSelector = sourceCaptureConfig.sourceCloseSelector

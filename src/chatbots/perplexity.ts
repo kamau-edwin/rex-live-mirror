@@ -375,20 +375,22 @@ export class PerplexityParser {
     this.extractedResponseIds.add(currentResponseId)
   }
 
-  private isSourcesToggleButton(button: Element): boolean {
-    const aria = (button.getAttribute('aria-label') || '').toLowerCase()
-    if (aria.includes('source')) {
-      return true
+  /**
+   * Strictly the page-level Links tab trigger: a real Radix tab
+   * (role="tab") whose aria-controls points at a "-content-sources"
+   * tabpanel. No text/label-based matching at all -- Perplexity also
+   * renders other "sources"-labeled controls (an inline per-turn button,
+   * and a separate "N sources" favicon pill that opens its own dropdown),
+   * and any fallback that matches on text or a broader selector risks
+   * clicking one of those instead. Only this structural shape is ever
+   * clicked for source extraction.
+   */
+  private isSourcesTabTrigger(button: Element): boolean {
+    if (button.getAttribute('role') !== 'tab') {
+      return false
     }
-
-    // Matches the "N sources" pill variant (a different element shape than
-    // the Links tab trigger below, also covered by the sourceToggleButton
-    // selector list). The Links tab trigger itself has no aria-label and its
-    // text is literally "Links" -- it never matches this, by design; it is
-    // identified structurally instead (aria-controls ending in
-    // "-content-sources"), not by text/label content.
-    const text = this.normalizeText(button.textContent).toLowerCase()
-    return /\b\d+\s+sources\b/.test(text) || /\bsources\b/.test(text)
+    const controls = button.getAttribute('aria-controls') || ''
+    return controls.endsWith('-content-sources')
   }
 
   private getSourceToggleGlobal(): HTMLElement | null {
@@ -398,26 +400,25 @@ export class PerplexityParser {
     }
     // Searches document-level (not scoped to a turn container) for controls like
     // the Perplexity "Links" header tab that lives outside response containers.
+    // sourceToggleButton's configured selector list includes broader
+    // alternatives (for other UI variants), but candidates are filtered down
+    // to isSourcesTabTrigger's strict structural check before ever being
+    // returned, so a non-tab element (an inline per-turn button, a "N
+    // sources" pill, etc.) is never clicked even if it happens to match one
+    // of those broader alternatives.
     const candidates = Array.from(document.querySelectorAll(toggleSelector))
+      .filter((candidate) => this.isSourcesTabTrigger(candidate))
 
-    // Perplexity renders one Links-tab trigger button per turn (all matching
-    // aria-controls$="-content-sources"), with only the current turn's
-    // marked active. Confirmed live: an inactive prior turn's trigger has
-    // aria-selected="false"/data-state="inactive"/tabindex="-1" and is
-    // otherwise structurally identical, so text/label content cannot
-    // distinguish them -- only active state can. Prefer that; the "N
-    // sources" pill match and last-in-DOM are both weaker fallbacks for
-    // when no trigger is marked active yet (e.g. very early render).
+    // Perplexity renders one Links-tab trigger button per turn, with only
+    // the current turn's marked active. Confirmed live: an inactive prior
+    // turn's trigger (aria-selected="false"/data-state="inactive"/
+    // tabindex="-1") is otherwise structurally identical, so active state is
+    // the only reliable signal for which one is current.
     const activeToggle = candidates.find((candidate) => (
       candidate.getAttribute('aria-selected') === 'true' || candidate.getAttribute('data-state') === 'active'
     ))
     if (activeToggle) {
       return activeToggle as HTMLElement
-    }
-
-    const matched = candidates.find((candidate) => this.isSourcesToggleButton(candidate))
-    if (matched) {
-      return matched as HTMLElement
     }
 
     // Last, not first: new turns are appended after existing ones in the
@@ -490,13 +491,24 @@ export class PerplexityParser {
   private closeSourcesPanel(responseContainer?: Element): void {
     const activePanel = this.findOpenSourcesPanel()
 
-    // When closing the current-turn tabpanel, prefer clicking the Sources toggle
-    // because the UI uses the same control for open/close. Always the
-    // page-level Links tab (see extractSources) -- not a per-turn toggle
-    // inside responseContainer, which can resolve to a different, inline
-    // "sources" button instead.
+    // The Links affordance is a Radix tab, not a collapsible panel:
+    // re-clicking the already-active Links trigger is a no-op (an
+    // already-selected tab does not deselect itself), so it never actually
+    // returns to the Answers tab. Click the Answers (-content-default)
+    // trigger that shares the SAME turn's Radix id prefix as the Links
+    // trigger we resolve here, so the correct turn's tab -- not a different,
+    // older turn's -- gets restored.
     if (activePanel) {
       const toggle = this.getSourceToggleGlobal()
+      const toggleId = toggle?.getAttribute('id') || ''
+      const prefixMatch = toggleId.match(/^(radix-.+?-)trigger-/)
+      const defaultTab = (prefixMatch
+        ? document.querySelector(`[role="tab"][id="${prefixMatch[1]}trigger-default"]`)
+        : null) as HTMLElement | null
+      if (defaultTab) {
+        defaultTab.click()
+        return
+      }
       if (toggle) {
         toggle.click()
         return
