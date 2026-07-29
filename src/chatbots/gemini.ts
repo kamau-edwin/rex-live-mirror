@@ -761,6 +761,31 @@ export class GeminiParser {
         return { opened: true, attempted: true, noSources: false }
       }
 
+      // More menu -> "View sources" tried FIRST. Confirmed live (2026-07-29):
+      // the inline citation chip (e.g. "View source details for citations
+      // from The Guardian...") still exists and matches isCitationSourceButton,
+      // but clicking it does not populate any configured sourceDetailAnchors
+      // selector -- across 8 retries with a real logged-in session, the
+      // side panel never appeared. The More menu's "View sources" item is
+      // the affordance that actually works in the current UI. The inline
+      // chip and footer toggle are kept as fallbacks in case some other
+      // response shape still relies on them.
+      const menuButton = latestTurnSourceMenuButtons.find((button): button is HTMLElement => button instanceof HTMLElement)
+      if (menuButton) {
+        menuButton.click()
+        console.log('[GeminiParser] Clicked More menu button while probing for View sources')
+
+        const viewSourcesItem = this.findViewSourcesMenuItem()
+        if (viewSourcesItem) {
+          viewSourcesItem.click()
+          console.log('[GeminiParser] Clicked View sources from More menu')
+          return { opened: true, attempted: true, noSources: false }
+        }
+
+        this.closeTransientMenuOrDialog()
+        console.log('[GeminiParser] More menu did not expose View sources for this turn; falling back to inline citation/toggle')
+      }
+
       const inlineCitationTrigger = latestTurnCitationButtons.find((button): button is HTMLElement => button instanceof HTMLElement)
       if (inlineCitationTrigger) {
         return clickTrigger(inlineCitationTrigger, 'inline citation button')
@@ -773,24 +798,13 @@ export class GeminiParser {
         return clickTrigger(sourceToggle, 'sources toggle')
       }
 
-      const menuButton = latestTurnSourceMenuButtons.find((button): button is HTMLElement => button instanceof HTMLElement)
-      if (!menuButton) {
-        return { opened: false, attempted: false, noSources: false }
-      }
-
-      menuButton.click()
-      console.log('[GeminiParser] Clicked More menu button while probing for View sources')
-
-      const viewSourcesItem = this.findViewSourcesMenuItem()
-      if (!viewSourcesItem) {
-        this.closeTransientMenuOrDialog()
-        console.log('[GeminiParser] More menu did not expose View sources for this turn')
+      // More menu was tried above; if it existed but did not expose View
+      // sources, and no other affordance is available, report noSources.
+      if (menuButton) {
         return { opened: false, attempted: true, noSources: true }
       }
 
-      viewSourcesItem.click()
-      console.log('[GeminiParser] Clicked View sources from More menu')
-      return { opened: true, attempted: true, noSources: false }
+      return { opened: false, attempted: false, noSources: false }
     }
 
     // If latest turn has no source affordance at all, do not read side panel anchors (which can be stale).
