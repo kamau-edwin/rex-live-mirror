@@ -287,10 +287,8 @@ export class GeminiParser {
       !!document.querySelector('side-bar-sources:not([aria-hidden="true"])') ||
       this.isDialogOpen()
     if (panelOpen) {
-      const closeIcon = document.querySelector('mat-icon[data-mat-icon-name="close"]')
-      const closeIconButton = closeIcon?.closest('button') as HTMLElement | null
-
       const configuredCloseSelector = this.resolveSelector('sourceCloseButton')
+      const defaultCloseSelector = 'mat-icon[data-mat-icon-name="close"]'
       const fallbackCloseSelectors = [
         'side-bar-sources button[data-test-id="close-button"]',
         'context-sidebar button[data-test-id="close-button"]',
@@ -299,16 +297,23 @@ export class GeminiParser {
         'context-sidebar button[aria-label*="close" i]',
       ]
 
-      const closeSelectors = configuredCloseSelector
-        ? [configuredCloseSelector, ...fallbackCloseSelectors]
-        : fallbackCloseSelectors
+      const closeSelectors = [
+        configuredCloseSelector || defaultCloseSelector,
+        ...fallbackCloseSelectors,
+      ]
 
-      let closeButton: HTMLElement | null = closeIconButton
-      for (const selector of closeSelectors) {
+      let closeButton: HTMLElement | null = null
+      for (const selectorGroup of closeSelectors) {
+        for (const selector of selectorGroup.split(',').map((part) => part.trim()).filter(Boolean)) {
+          const matched = document.querySelector(selector)
+          closeButton = (matched?.closest('button') as HTMLElement | null) || (matched as HTMLElement | null)
+          if (closeButton) {
+            break
+          }
+        }
         if (closeButton) {
           break
         }
-        closeButton = document.querySelector(selector) as HTMLElement | null
       }
 
       if (closeButton) {
@@ -1005,21 +1010,16 @@ export class GeminiParser {
       // Confirmed live (2026-07-29): the sources panel has a dedicated close
       // button -- a mat-icon (fonticon="close", data-mat-icon-name="close")
       // whose enclosing <button> is the actual clickable close control. This
-      // is the real close affordance and is tried first. The earlier
-      // "reopen More menu -> View sources" toggle-close approach was tried
-      // and confirmed NOT to work in automated testing (the reopened menu
-      // did not expose "View sources" as a findable item, and the panel
-      // remained open across repeated live runs), so it is kept only as a
-      // fallback below in case this selector doesn't match some UI variant.
-      const closeIcon = document.querySelector('mat-icon[data-mat-icon-name="close"]')
-      const closeIconButton = closeIcon?.closest('button') as HTMLElement | null
-      if (closeIconButton) {
-        closeIconButton.click()
-        console.log('[GeminiParser] Closed sources panel via mat-icon close button')
-        return
-      }
-
+      // is the real close affordance and is tried first, driven by the
+      // configured sourceCloseButton selector (falling back to a built-in
+      // default only if config doesn't supply one) so a backend config
+      // change is picked up without a code change. The earlier "reopen More
+      // menu -> View sources" toggle-close approach was tried and confirmed
+      // NOT to work in automated testing (the reopened menu did not expose
+      // "View sources" as a findable item, and the panel remained open
+      // across repeated live runs), so it is kept only as a fallback below.
       const configuredCloseSelector = this.resolveSelector('sourceCloseButton')
+      const defaultCloseSelector = 'mat-icon[data-mat-icon-name="close"]'
       const fallbackCloseSelectors = [
         'side-bar-sources button[data-test-id="close-button"]',
         'context-sidebar button[data-test-id="close-button"]',
@@ -1028,13 +1028,20 @@ export class GeminiParser {
         'context-sidebar button[aria-label*="close" i]',
       ]
 
-      const closeSelectors = configuredCloseSelector
-        ? [configuredCloseSelector, ...fallbackCloseSelectors]
-        : fallbackCloseSelectors
+      const closeSelectors = [
+        configuredCloseSelector || defaultCloseSelector,
+        ...fallbackCloseSelectors,
+      ]
 
       let closeButton: HTMLElement | null = null
-      for (const selector of closeSelectors) {
-        closeButton = document.querySelector(selector) as HTMLElement | null
+      for (const selectorGroup of closeSelectors) {
+        for (const selector of selectorGroup.split(',').map((part) => part.trim()).filter(Boolean)) {
+          const matched = document.querySelector(selector)
+          closeButton = (matched?.closest('button') as HTMLElement | null) || (matched as HTMLElement | null)
+          if (closeButton) {
+            break
+          }
+        }
         if (closeButton) {
           break
         }
