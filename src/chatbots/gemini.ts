@@ -778,6 +778,24 @@ export class GeminiParser {
       // the affordance that actually works in the current UI. The inline
       // chip and footer toggle are kept as fallbacks in case some other
       // response shape still relies on them.
+      //
+      // Confirmed live (2026-07-30): re-clicking More menu -> View sources
+      // on every retry (while the panel this parser already opened for this
+      // exact turn is still open) re-triggers the same toggle affordance
+      // that was confirmed to close the panel -- reopening the menu no
+      // longer exposes "View sources" as a findable item, so this branch
+      // fell through to noSources/closeTransientMenuOrDialog and either hid
+      // the panel it had just opened or spammed Escape every retry, so
+      // "Source extraction unresolved after 8 retries" fired even though
+      // the panel was genuinely open and anchors just hadn't hydrated yet.
+      // Once this parser owns the panel for the current turn, skip
+      // re-probing the menu entirely and just let the caller re-read
+      // sourceDetailAnchors from the DOM on the next mutation.
+      if (panelOwnedByCurrentTurn) {
+        console.log('[GeminiParser] Sources panel already opened for this turn; waiting for anchors to hydrate, not re-probing More menu')
+        return { opened: false, attempted: true, noSources: false }
+      }
+
       const menuButton = latestTurnSourceMenuButtons.find((button): button is HTMLElement => button instanceof HTMLElement)
       if (menuButton) {
         menuButton.click()
