@@ -21,6 +21,14 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
   private readonly ORPHANED_QUESTION_TIMEOUT_MS: number = 5 * 60 * 1000 // 5 minutes
   private readonly EARLY_RESPONSE_TIMEOUT_MS: number = 30 * 1000 // 30 seconds (wait for question to arrive)
   private cleanupIntervalId: NodeJS.Timeout | null = null
+  // Per-conversation question turn counter (1 = first turn, 2 = second, ...),
+  // used for chatbot-question's secondary_identifier. Unlike
+  // pendingQuestionByConversation this persists for the whole conversation,
+  // not just until the next response, so it needs its own idle-based
+  // eviction rather than being cleared on answer/orphan like that map is.
+  private conversationTurnCounts: Map<string, number> = new Map()
+  private conversationTurnLastSeenAt: Map<string, number> = new Map()
+  private readonly CONVERSATION_TURN_IDLE_TIMEOUT_MS: number = 30 * 60 * 1000 // 30 minutes
 
   constructor() {
     super()
@@ -69,6 +77,7 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
           // Start orphaned question cleanup interval (every 30 seconds)
           this.cleanupIntervalId = setInterval(() => {
             this.cleanupOrphanedQuestions()
+            this.cleanupStaleConversationTurnCounts()
           }, 30 * 1000)
           console.log('[LLM Chatbot] Orphaned question cleanup interval started')
         }
@@ -137,11 +146,17 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
       return
     }
 
+    const chatbotName = question.source ?? 'unknown'
+    const turnNumber = this.nextConversationTurnNumber(question.conversation_id)
+
     dispatchEvent({
-      name: 'pdk-app-event',
+      name: `chatbot-question-${chatbotName}`,
       event_name: 'chatbot-question',
-      generatorId: 'chatbot-question',
-      chatbot_name: question.source ?? 'unknown',
+      generatorId: `chatbot-question-${chatbotName}`,
+      chatbot_name: chatbotName,
+      secondary_identifier: String(turnNumber),
+      turn_number: turnNumber,
+      is_first_turn: turnNumber === 1,
       question: {
         url: question.url ?? null,
         conversation_id: question.conversation_id ?? null,
@@ -151,7 +166,7 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
       },
     })
 
-    console.log('[LLM Chatbot] Dispatched chatbot-question for', question.source, '(conversation:', question.conversation_id, ')')
+    console.log('[LLM Chatbot] Dispatched chatbot-question-' + chatbotName, '(conversation:', question.conversation_id, ', turn:', turnNumber, ')')
   }
 
   /**
@@ -459,6 +474,53 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
     if (conversationKeysToDelete.length > 0) {
       console.log(`[LLM Chatbot] Orphaned question cleanup: removed ${conversationKeysToDelete.length} pending questions`)
     }
+  }
+
+  /**
+   * Evicts turn-count state for conversations that have gone idle, so the
+   * Map doesn't grow unbounded across long sessions. Longer timeout than
+   * ORPHANED_QUESTION_TIMEOUT_MS since a real conversation can have long
+   * gaps between turns without having actually ended.
+   */
+  private cleanupStaleConversationTurnCounts(): void {
+    const now = Date.now()
+    const staleKeys: string[] = []
+
+    for (const [conversationKey, lastSeenAt] of this.conversationTurnLastSeenAt.entries()) {
+      if (now - lastSeenAt > this.CONVERSATION_TURN_IDLE_TIMEOUT_MS) {
+        staleKeys.push(conversationKey)
+      }
+    }
+
+    for (const conversationKey of staleKeys) {
+      this.conversationTurnCounts.delete(conversationKey)
+      this.conversationTurnLastSeenAt.delete(conversationKey)
+    }
+
+    if (staleKeys.length > 0) {
+      console.log(`[LLM Chatbot] Conversation turn-count cleanup: removed ${staleKeys.length} idle conversations`)
+    }
+  }
+
+  /**
+   * Returns the 1-based turn number for a question in its conversation,
+   * incrementing and persisting the per-conversation counter. Questions with
+   * no conversation_id can't be reliably ordered against each other, so they
+   * always report as turn 1 rather than sharing a counter across unrelated
+   * conversations.
+   */
+  private nextConversationTurnNumber(conversationId: string | null | undefined): number {
+    if (!conversationId) {
+      return 1
+    }
+
+    const previousCount = this.conversationTurnCounts.get(conversationId) ?? 0
+    const turnNumber = previousCount + 1
+
+    this.conversationTurnCounts.set(conversationId, turnNumber)
+    this.conversationTurnLastSeenAt.set(conversationId, Date.now())
+
+    return turnNumber
   }
 
   /**
