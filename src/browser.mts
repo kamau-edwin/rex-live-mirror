@@ -984,6 +984,33 @@ class LLMChatbotBrowserModule extends REXClientModule {
     }, 0)
   }
 
+  // Best-effort sources_html for parsers without Perplexity's dedicated, verified
+  // sources panel. Gemini has a real panel (side-bar-sources) once the More-menu
+  // "View sources" flow opens it; ChatGPT has no panel at all, so the assistant
+  // message container is the closest available approximation. Never throws --
+  // any DOM-shape surprise just yields undefined, so this can't block or degrade
+  // extraction/dispatch.
+  private captureBestEffortSourcesHtml(responseContainerRef?: Element | null): string | undefined {
+    try {
+      const parserName = this.parser?.name
+      if (parserName === 'gemini') {
+        const panelSelector = 'side-bar-sources'
+        const panel = document.querySelector(panelSelector)
+        return panel instanceof HTMLElement ? panel.outerHTML : undefined
+      }
+      if (parserName === 'chatgpt') {
+        const assistantSelector = this.parser?.selectors?.assistantMessage
+        const container = assistantSelector
+          ? (responseContainerRef?.closest(assistantSelector) as HTMLElement | null) ?? responseContainerRef
+          : responseContainerRef
+        return container instanceof HTMLElement ? container.outerHTML : undefined
+      }
+    } catch (error) {
+      console.warn('[LLM Chatbot Browser] Best-effort sources_html capture failed, continuing without it:', error)
+    }
+    return undefined
+  }
+
   private disconnectTurnRetryObserver(pendingEntry?: PendingSourceExtractionInfo): void {
     if (pendingEntry?.turnRetryFallbackTimer !== undefined) {
       clearTimeout(pendingEntry.turnRetryFallbackTimer)
@@ -1702,6 +1729,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
               }
               if (extractedSources.length > 0) {
                 console.log(`[LLM Chatbot Browser] Extracted ${extractedSources.length} sources immediately for response`)
+                extractedSourcesHtml = this.captureBestEffortSourcesHtml(responseContainerRef ?? null)
                 // Close the sources panel after extraction completes
                 if (typeof this.parser.closeSourcesPanel === 'function') {
                   this.parser.closeSourcesPanel()
@@ -1720,6 +1748,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
               if (sourcesButton) {
                 if (extractedSources.length > 0) {
                   console.log(`[LLM Chatbot Browser] Extracted ${extractedSources.length} sources immediately for response (sources button detected in DOM)`)
+                  extractedSourcesHtml = this.captureBestEffortSourcesHtml(responseContainerRef ?? null)
                   if (typeof this.parser.closeSourcesPanel === 'function') {
                     this.parser.closeSourcesPanel()
                   }

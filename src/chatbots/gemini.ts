@@ -358,6 +358,10 @@ export class GeminiParser {
     return !!document.querySelector('[role="dialog"]:not([aria-hidden="true"])')
   }
 
+  private isMoreMenuOpen(): boolean {
+    return !!document.querySelector('[role="menu"]:not([aria-hidden="true"])')
+  }
+
   private closeTransientMenuOrDialog(): void {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
   }
@@ -805,6 +809,14 @@ export class GeminiParser {
         if (viewSourcesItem) {
           viewSourcesItem.click()
           console.log('[GeminiParser] Clicked View sources from More menu')
+          // Selecting the item normally auto-closes the dropdown, but if it
+          // doesn't (leaving a stray open menu on top of the sources panel),
+          // send Escape -- but only when the menu is still actually open, so
+          // this never risks dismissing the sources panel that was just opened.
+          if (this.isMoreMenuOpen()) {
+            this.closeTransientMenuOrDialog()
+            console.log('[GeminiParser] More menu remained open after selecting View sources; closed it')
+          }
           return { opened: true, attempted: true, noSources: false }
         }
 
