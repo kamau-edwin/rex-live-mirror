@@ -371,13 +371,18 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
             }
           }
 
-          dispatchEvent({
-            name: 'pdk-app-event',
-            event_name: 'chatbot-interaction',
-            generatorId: 'chatbot-interaction',
-            interaction: interactionPayload,
-            chatbot_name: interaction.source ?? pendingQuestion.source ?? 'unknown',
-          })
+          {
+            const chatbotName = interaction.source ?? pendingQuestion.source ?? 'unknown'
+
+            dispatchEvent({
+              name: `chatbot-interaction-${chatbotName}`,
+              event_name: 'chatbot-interaction',
+              generatorId: `chatbot-interaction-${chatbotName}`,
+              interaction: interactionPayload,
+              chatbot_name: chatbotName,
+              secondary_identifier: chatbotName,
+            })
+          }
 
           markTransmitted(pendingQuestion)
           markTransmitted(interaction)

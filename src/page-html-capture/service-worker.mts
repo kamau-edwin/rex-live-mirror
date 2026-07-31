@@ -412,9 +412,9 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
     }
 
     dispatchEvent({
-      name: 'chatbot-html-snapshot',
+      name: `chatbot-html-snapshot-${secondaryIdentifier}`,
       event_name: resolveSnapshotEventName(configuration),
-      generatorId: capture.generatorId ?? 'chatbot-html-snapshot',
+      generatorId: capture.generatorId ?? `chatbot-html-snapshot-${secondaryIdentifier}`,
       secondary_identifier: secondaryIdentifier,
       chatbot_name: secondaryIdentifier,
       source: capture.source ?? 'page_html_capture',
