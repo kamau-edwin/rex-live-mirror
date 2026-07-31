@@ -56,8 +56,14 @@ export class ChatGPTParser {
   selectors: ChatGPTSelectors
   private fallbackMode: ChatGPTFallbackMode
   private selectorFallbacks: ChatGPTSelectorFallbacks
-  private lastResponseSnapshot = ''
-  private stableResponseChecks = 0
+  // Keyed by assistant message count in the DOM at check time, so stability
+  // tracking for one turn doesn't get contaminated by a later turn's content.
+  // getCompletionDecision() always evaluates whatever is currently the last
+  // real assistant message -- without this keying, a caller processing a
+  // stale/queued turn-1 response would have its stability state compared
+  // against turn 2's live content once a second question has been asked.
+  private lastResponseSnapshotByTurn = new Map<number, string>()
+  private stableResponseChecksByTurn = new Map<number, number>()
   private selectorValidationError: string | null = null
 
   constructor(config?: ChatGPTConfig) {
@@ -269,17 +275,19 @@ export class ChatGPTParser {
     // last DOM match lands on that placeholder and the completion check never
     // sees real content. Walk backwards and skip inert (empty, non-busy) matches
     // so we land on the actual last response instead.
-    const getLastRealAssistantMessage = (selector: string): Element | null => {
+    // Also returns the 1-based index of the matched element among all matches,
+    // used to key per-turn stability tracking below.
+    const getLastRealAssistantMessage = (selector: string): { element: Element | null; turnIndex: number } => {
       const matches = document.querySelectorAll(selector)
       for (let index = matches.length - 1; index >= 0; index -= 1) {
         const candidate = matches[index]
         const isBusy = candidate.getAttribute('aria-busy') === 'true'
         const hasText = (candidate.textContent || '').trim().length > 0
         if (isBusy || hasText) {
-          return candidate
+          return { element: candidate, turnIndex: index + 1 }
         }
       }
-      return matches.length > 0 ? matches[matches.length - 1] : null
+      return { element: matches.length > 0 ? matches[matches.length - 1] : null, turnIndex: matches.length }
     }
 
     if (stopGeneratingSelector && document.querySelector(stopGeneratingSelector)) {
@@ -291,7 +299,7 @@ export class ChatGPTParser {
       }
     }
 
-    const latestAssistantMsg = getLastRealAssistantMessage(assistantSelector)
+    const { element: latestAssistantMsg, turnIndex: latestAssistantTurnIndex } = getLastRealAssistantMessage(assistantSelector)
     if (latestAssistantMsg?.getAttribute('aria-busy') === 'true') {
       console.log('[ChatGPTParser] Response still streaming - aria-busy="true" detected')
       return {
@@ -343,12 +351,20 @@ export class ChatGPTParser {
       }
     }
 
-    // Track response stability: ensure content isn't still being streamed/mutated
-    if (latestContent === this.lastResponseSnapshot) {
-      this.stableResponseChecks += 1
+    // Track response stability: ensure content isn't still being streamed/mutated.
+    // Keyed per-turn so a caller re-evaluating an older, already-queued response
+    // (e.g. turn 1 still pending source extraction after turn 2's question was
+    // asked) checks stability against that turn's own history, not whatever is
+    // currently the latest turn in the DOM.
+    const previousSnapshot = this.lastResponseSnapshotByTurn.get(latestAssistantTurnIndex)
+    if (latestContent === previousSnapshot) {
+      this.stableResponseChecksByTurn.set(
+        latestAssistantTurnIndex,
+        (this.stableResponseChecksByTurn.get(latestAssistantTurnIndex) || 0) + 1,
+      )
     } else {
-      this.lastResponseSnapshot = latestContent
-      this.stableResponseChecks = 0
+      this.lastResponseSnapshotByTurn.set(latestAssistantTurnIndex, latestContent)
+      this.stableResponseChecksByTurn.set(latestAssistantTurnIndex, 0)
       console.log('[ChatGPTParser] Response changed - waiting for stability before capture')
       return {
         completed: false,
@@ -357,7 +373,7 @@ export class ChatGPTParser {
       }
     }
 
-    if (this.stableResponseChecks < 1) {
+    if ((this.stableResponseChecksByTurn.get(latestAssistantTurnIndex) || 0) < 1) {
       console.log('[ChatGPTParser] Waiting one extra poll for response stability')
       return {
         completed: false,
