@@ -185,8 +185,16 @@ export class ChatGPTParser {
 
     const interactions: ParsedInteraction[] = []
     const userMessageSelector = this.resolveSelector('userMessage')
-    const assistantMessageSelector = this.resolveSelector('assistantMessage')
-    const assistantContentSelector = this.resolveSelector('assistantContent')
+    // assistantMessage is a leaf content selector on ChatGPT -- it can match
+    // MULTIPLE nodes per turn (e.g. a prose chunk, a sources-adjacent wrapper,
+    // and an ad-slot wrapper all sharing [data-conversation-screenshot-content]).
+    // assistantTurnContainer is the selector that's actually one-per-turn, so
+    // it must be the iteration boundary here; assistantMessage/assistantContent
+    // are then resolved *within* each turn container. Iterating assistantMessage
+    // directly produced extra empty/duplicate 'response' interactions per turn,
+    // which desynced question/response pairing on the second+ turn.
+    const assistantTurnSelector = this.resolveSelector('assistantTurnContainer')
+    const assistantContentSelector = this.resolveSelector('assistantContent') || this.resolveSelector('assistantMessage')
     const conversationTurnSelector = this.resolveSelector('conversationTurnFallback')
 
     if (userMessageSelector) {
@@ -203,11 +211,11 @@ export class ChatGPTParser {
       })
     }
 
-    if (assistantMessageSelector) {
-      const assistantMessageContainers = document.querySelectorAll(assistantMessageSelector)
-      console.log(`[ChatGPTParser] Found ${assistantMessageContainers.length} assistant message elements`)
+    if (assistantTurnSelector) {
+      const assistantTurnContainers = document.querySelectorAll(assistantTurnSelector)
+      console.log(`[ChatGPTParser] Found ${assistantTurnContainers.length} assistant turn containers`)
 
-      assistantMessageContainers.forEach((container) => {
+      assistantTurnContainers.forEach((container) => {
         const proseElement = assistantContentSelector ? container.querySelector(assistantContentSelector) : null
         const content = proseElement?.textContent?.trim() || container.textContent?.trim() || null
 
@@ -249,14 +257,13 @@ export class ChatGPTParser {
     }
 
     const stopGeneratingSelector = this.resolveSelector('stopGeneratingButton')
-    const assistantSelector = this.resolveSelector('assistantMessage')
-    const assistantContentSelector = this.resolveSelector('assistantContent')
+    const assistantContentSelector = this.resolveSelector('assistantContent') || this.resolveSelector('assistantMessage')
     const writingBlockSelector = this.resolveSelector('writingBlock')
     const streamActiveSelector = this.resolveSelector('streamActive')
     const assistantTurnSelector = this.resolveSelector('assistantTurnContainer')
     const copyResponseSelector = this.resolveSelector('copyResponseButton')
 
-    if (!assistantSelector || !assistantContentSelector || !assistantTurnSelector || !copyResponseSelector) {
+    if (!assistantContentSelector || !assistantTurnSelector || !copyResponseSelector) {
       return {
         completed: false,
         reason: 'selector_validation_failed',
@@ -264,30 +271,18 @@ export class ChatGPTParser {
       }
     }
 
-    const getLastMatchedElement = (selector: string): Element | null => {
-      const matches = document.querySelectorAll(selector)
-      return matches.length > 0 ? matches[matches.length - 1] : null
-    }
-
-    // ChatGPT renders a trailing empty placeholder div matching the assistant
-    // message selector after the real response (data-conversation-screenshot-content
-    // with no text, likely a pre-rendered slot for the next turn). Taking the raw
-    // last DOM match lands on that placeholder and the completion check never
-    // sees real content. Walk backwards and skip inert (empty, non-busy) matches
-    // so we land on the actual last response instead.
+    // assistantTurnContainer is one-per-turn (unlike the leaf assistantMessage
+    // selector, which can match multiple nodes within a single turn), so the
+    // last match here is reliably the latest turn -- no need to skip inert
+    // placeholder matches the way a leaf-selector-based lookup would.
     // Also returns the 1-based index of the matched element among all matches,
     // used to key per-turn stability tracking below.
-    const getLastRealAssistantMessage = (selector: string): { element: Element | null; turnIndex: number } => {
+    const getLastAssistantTurn = (selector: string): { element: Element | null; turnIndex: number } => {
       const matches = document.querySelectorAll(selector)
-      for (let index = matches.length - 1; index >= 0; index -= 1) {
-        const candidate = matches[index]
-        const isBusy = candidate.getAttribute('aria-busy') === 'true'
-        const hasText = (candidate.textContent || '').trim().length > 0
-        if (isBusy || hasText) {
-          return { element: candidate, turnIndex: index + 1 }
-        }
+      return {
+        element: matches.length > 0 ? matches[matches.length - 1] : null,
+        turnIndex: matches.length,
       }
-      return { element: matches.length > 0 ? matches[matches.length - 1] : null, turnIndex: matches.length }
     }
 
     if (stopGeneratingSelector && document.querySelector(stopGeneratingSelector)) {
@@ -299,7 +294,7 @@ export class ChatGPTParser {
       }
     }
 
-    const { element: latestAssistantMsg, turnIndex: latestAssistantTurnIndex } = getLastRealAssistantMessage(assistantSelector)
+    const { element: latestAssistantMsg, turnIndex: latestAssistantTurnIndex } = getLastAssistantTurn(assistantTurnSelector)
     if (latestAssistantMsg?.getAttribute('aria-busy') === 'true') {
       console.log('[ChatGPTParser] Response still streaming - aria-busy="true" detected')
       return {
@@ -329,8 +324,7 @@ export class ChatGPTParser {
 
     const latestMarkdown = latestAssistantMsg?.querySelector(assistantContentSelector)
     const latestContent = (latestMarkdown?.textContent || latestAssistantMsg?.textContent || '').trim()
-    const latestAssistantTurn = getLastMatchedElement(assistantTurnSelector)
-    const hasCopyResponseButton = !!latestAssistantTurn?.querySelector(copyResponseSelector)
+    const hasCopyResponseButton = !!latestAssistantMsg?.querySelector(copyResponseSelector)
 
     if (!latestContent) {
       console.log('[ChatGPTParser] Response incomplete - empty assistant content')
