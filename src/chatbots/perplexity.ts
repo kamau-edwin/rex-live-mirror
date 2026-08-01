@@ -3,6 +3,8 @@
  * Extracts Q&A pairs from Perplexity chatbot interface
  */
 
+import type { ChatbotParser } from './parser.js'
+
 export interface ParsedInteraction {
   type: 'question' | 'response'
   content: string
@@ -69,7 +71,7 @@ export interface SelectorValidation {
   responsesFound: number
 }
 
-export class PerplexityParser {
+export class PerplexityParser implements ChatbotParser {
   name = 'perplexity'
   selectors: PerplexitySelectors
   private fallbackMode: PerplexityFallbackMode

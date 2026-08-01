@@ -3,6 +3,8 @@
  * Extracts Q&A pairs from Google Gemini interface
  */
 
+import type { ChatbotParser } from './parser.js'
+
 export interface ParsedInteraction {
   type: 'question' | 'response'
   content: string
@@ -64,7 +66,7 @@ export type GeminiSourceExtractionClassification =
   | 'data_capture_error'
   | 'panel_opening_failure'
 
-export class GeminiParser {
+export class GeminiParser implements ChatbotParser {
   name = 'gemini'
   selectors: GeminiSelectors
   private fallbackMode: GeminiFallbackMode

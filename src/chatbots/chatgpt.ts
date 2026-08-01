@@ -3,6 +3,8 @@
  * Extracts Q&A pairs from ChatGPT interface
  */
 
+import type { ChatbotParser } from './parser.js'
+
 export interface ParsedInteraction {
   type: 'question' | 'response'
   content: string
@@ -51,7 +53,7 @@ export interface ChatGPTCompletionDecision {
   recheckDelayMs?: number
 }
 
-export class ChatGPTParser {
+export class ChatGPTParser implements ChatbotParser {
   name = 'chatgpt'
   selectors: ChatGPTSelectors
   private fallbackMode: ChatGPTFallbackMode
