@@ -361,7 +361,21 @@ export class GeminiParser implements ChatbotParser {
   }
 
   private isMoreMenuOpen(): boolean {
-    return !!document.querySelector('[role="menu"]:not([aria-hidden="true"])')
+    // Confirmed live (2026-08-02): Gemini's More menu is a custom <gem-menu
+    // role="menu"> element that Angular keeps mounted in the DOM at all
+    // times, toggling data-visible rather than removing it or setting
+    // aria-hidden -- aria-hidden was observed null (attribute absent
+    // entirely) on both open and closed states, so a bare
+    // [role="menu"]:not([aria-hidden="true"]) check always matched,
+    // making the Escape-fallback fire unconditionally regardless of
+    // whether the dropdown had already auto-closed correctly.
+    const menu = document.querySelector('[role="menu"]')
+    if (!menu) return false
+    const dataVisible = menu.getAttribute('data-visible')
+    if (dataVisible !== null) return dataVisible === 'true'
+    // Fall back to the aria-hidden/absence heuristic for any menu
+    // implementation that doesn't use data-visible.
+    return menu.getAttribute('aria-hidden') !== 'true'
   }
 
   private closeTransientMenuOrDialog(): void {

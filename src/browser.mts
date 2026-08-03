@@ -119,6 +119,19 @@ class LLMChatbotBrowserModule extends REXClientModule {
   // intentionally re-asking the same short prompt) must never be swallowed
   // by this, so the window stays far below human reaction time.
   private readonly QUESTION_SUBMIT_DEDUPE_MS = 250
+  // Durable (no time window) record of every question content-prefix that has
+  // already produced a chatbot-question dispatch, via either path below.
+  // Needed because the submit-time keydown/click listeners only fire for a
+  // question typed or pasted into the prompt input then submitted with Enter
+  // or the send button -- a suggested-question chip that submits directly
+  // (confirmed live, 2026-08-02, across ChatGPT/Gemini/Perplexity) never
+  // touches the input or button, so neither listener runs and no
+  // chatbot-question is ever dispatched for it, even though the DOM-scan
+  // pipeline in processPage() still captures it as a chatbot-interaction
+  // question. Bounded the same way capturedPrefixes is (see PREFIX_LENGTH),
+  // and never needs eviction beyond the tab's lifetime -- it's a plain
+  // Set<string>, not a Map holding retained objects.
+  private dispatchedQuestionKeys: Set<string> = new Set()
   private readonly PROMPT_SUBMIT_DEFAULTS: Record<string, {
     promptInputCandidates: string[]
     submitAction: 'enter' | 'click'
@@ -554,6 +567,36 @@ class LLMChatbotBrowserModule extends REXClientModule {
     return (target.textContent ?? '').replace(/\s+/g, ' ').trim()
   }
 
+  private sendQuestionSubmittedMessage(
+    payload: {
+      source: string
+      url: string
+      conversation_id: string | null
+      submitted_at_ms: number
+      content: string
+      length: number
+    },
+    origin: 'submit-listener' | 'dom-scan-fallback',
+  ): void {
+    console.log(`[LLM Chatbot Browser] Question submitted (${origin}), dispatching:`, {
+      source: payload.source,
+      length: payload.length,
+      conversation_id: payload.conversation_id,
+    })
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(chrome.runtime.sendMessage as any)(
+      { messageType: 'llmQuestionSubmitted', question: payload },
+      () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const lastError = (chrome.runtime as any).lastError
+        if (lastError) {
+          console.warn('[LLM Chatbot Browser] Failed to send llmQuestionSubmitted:', lastError.message || lastError)
+        }
+      },
+    )
+  }
+
   private dispatchQuestionSubmitted(content: string): void {
     const trimmed = content.trim()
     if (!trimmed) {
@@ -579,6 +622,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
     }
     this.lastSubmittedQuestionKey = dedupeKey
     this.lastSubmittedQuestionAtMs = now
+    this.dispatchedQuestionKeys.add(dedupeKey)
 
     const payload = {
       source: this.parser?.name || 'unknown',
@@ -589,23 +633,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
       length: trimmed.length,
     }
 
-    console.log('[LLM Chatbot Browser] Question submitted, dispatching immediately:', {
-      source: payload.source,
-      length: payload.length,
-      conversation_id: payload.conversation_id,
-    })
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ;(chrome.runtime.sendMessage as any)(
-      { messageType: 'llmQuestionSubmitted', question: payload },
-      () => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const lastError = (chrome.runtime as any).lastError
-        if (lastError) {
-          console.warn('[LLM Chatbot Browser] Failed to send llmQuestionSubmitted:', lastError.message || lastError)
-        }
-      },
-    )
+    this.sendQuestionSubmittedMessage(payload, 'submit-listener')
 
     // Replace waiting on page-html-capture's blind periodic interval with an
     // event-driven capture fired as soon as this turn's response completes
@@ -987,7 +1015,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
   // Best-effort sources_html for parsers without Perplexity's dedicated, verified
   // sources panel. Gemini has a real panel (side-bar-sources) once the More-menu
   // "View sources" flow opens it; ChatGPT has no panel at all, so the assistant
-  // message container is the closest available approximation. Never throws --
+  // turn container is the closest available approximation. Never throws --
   // any DOM-shape surprise just yields undefined, so this can't block or degrade
   // extraction/dispatch.
   private captureBestEffortSourcesHtml(responseContainerRef?: Element | null): string | undefined {
@@ -999,16 +1027,30 @@ class LLMChatbotBrowserModule extends REXClientModule {
         return panel instanceof HTMLElement ? panel.outerHTML : undefined
       }
       if (parserName === 'chatgpt') {
-        const assistantSelector = this.parser?.selectors?.assistantMessage
-        const container = assistantSelector
-          ? (responseContainerRef?.closest(assistantSelector) as HTMLElement | null) ?? responseContainerRef
-          : responseContainerRef
+        // ChatGPTParser has no resolveContainer(), so responseContainerRef is
+        // always undefined here -- unlike Gemini/Perplexity. Resolve directly
+        // via assistantTurnContainer (one-per-turn; see aa0f65d), falling back
+        // to responseContainer, then the leaf assistantMessage selector, same
+        // fallback order as getAssistantTurnContainerSelector(). Take the last
+        // match since new turns append after existing ones in DOM order --
+        // matches extractSources()'s own document.querySelectorAll() pattern.
+        const container = responseContainerRef
+          ?? this.resolveLatestChatGptTurnContainer()
         return container instanceof HTMLElement ? container.outerHTML : undefined
       }
     } catch (error) {
       console.warn('[LLM Chatbot Browser] Best-effort sources_html capture failed, continuing without it:', error)
     }
     return undefined
+  }
+
+  private resolveLatestChatGptTurnContainer(): HTMLElement | undefined {
+    const selector = this.getAssistantTurnContainerSelector()
+      ?? this.parser?.selectors?.assistantMessage
+    if (!selector) return undefined
+    const matches = Array.from(document.querySelectorAll(selector))
+    const last = matches[matches.length - 1]
+    return last instanceof HTMLElement ? last : undefined
   }
 
   private disconnectTurnRetryObserver(pendingEntry?: PendingSourceExtractionInfo): void {
@@ -1748,13 +1790,27 @@ class LLMChatbotBrowserModule extends REXClientModule {
               if (sourcesButton) {
                 if (extractedSources.length > 0) {
                   console.log(`[LLM Chatbot Browser] Extracted ${extractedSources.length} sources immediately for response (sources button detected in DOM)`)
-                  extractedSourcesHtml = this.captureBestEffortSourcesHtml(responseContainerRef ?? null)
-                  if (typeof this.parser.closeSourcesPanel === 'function') {
-                    this.parser.closeSourcesPanel()
-                  }
                 }
               } else {
                 console.log(`[LLM Chatbot Browser] Response detected without visible source toggle in turn container; extraction still attempted`)
+              }
+              // sources_html capture and panel close are intentionally outside
+              // the sourcesButton gate above: extractSources() (called earlier
+              // in this branch) can already have clicked through Gemini's
+              // More-menu -> View sources flow and mutated the DOM by the time
+              // sourcesButton is read here, so a live-verified run (2026-08-02)
+              // showed extractedSources.length > 0 (9 real sources) with
+              // sourcesButton falsy, silently skipping sources_html every
+              // time despite the panel genuinely being open. Both calls are
+              // themselves safe no-ops when their target element isn't
+              // present, so running them unconditionally on
+              // extractedSources.length > 0 can't regress the sourcesButton
+              // branch's original intent.
+              if (extractedSources.length > 0) {
+                extractedSourcesHtml = this.captureBestEffortSourcesHtml(responseContainerRef ?? null)
+                if (typeof this.parser.closeSourcesPanel === 'function') {
+                  this.parser.closeSourcesPanel()
+                }
               }
             }
           } catch (error) {
@@ -1855,6 +1911,31 @@ class LLMChatbotBrowserModule extends REXClientModule {
           }
           if (newInteraction.type === 'response') {
             console.log(`[LLM Chatbot Browser] Response created with ${newInteraction.sources?.length || 0} sources`)
+          }
+
+          // Fallback chatbot-question dispatch for questions the submit-time
+          // keydown/click listeners never saw -- confirmed live (2026-08-02,
+          // ChatGPT/Gemini/Perplexity) that a suggested-question chip click
+          // submits the question directly without the prompt input or send
+          // button ever being touched, so neither listener fires and no
+          // chatbot-question event is dispatched, even though this DOM-scan
+          // path still captures the question fine as a chatbot-interaction.
+          // Guarded by dispatchedQuestionKeys so a normally-typed-and-Enter'd
+          // question (already dispatched by dispatchQuestionSubmitted) is
+          // never double-dispatched here.
+          if (newInteraction.type === 'question') {
+            const questionDedupeKey = newInteraction.content.trim().slice(0, this.PREFIX_LENGTH)
+            if (!this.dispatchedQuestionKeys.has(questionDedupeKey)) {
+              this.dispatchedQuestionKeys.add(questionDedupeKey)
+              this.sendQuestionSubmittedMessage({
+                source: this.parser?.name || 'unknown',
+                url: newInteraction.url,
+                conversation_id: newInteraction.conversation_id ?? null,
+                submitted_at_ms: newInteraction.timestamp,
+                content: newInteraction.content,
+                length: newInteraction.length,
+              }, 'dom-scan-fallback')
+            }
           }
 
           this.capturedPrefixes.set(prefixKey, { interaction_id: newId, length: currentLength })

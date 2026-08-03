@@ -29,6 +29,21 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
   private conversationTurnCounts: Map<string, number> = new Map()
   private conversationTurnLastSeenAt: Map<string, number> = new Map()
   private readonly CONVERSATION_TURN_IDLE_TIMEOUT_MS: number = 30 * 60 * 1000 // 30 minutes
+  // A conversation's first question is dispatched before the platform has
+  // assigned/exposed a real conversation_id in the URL (browser.mts reads
+  // getEffectiveConversationId() synchronously at submit time, before the
+  // question has been answered) -- so it arrives here with conversation_id
+  // undefined, correctly starting at turn 1 under the "no id" branch below.
+  // The *second* question in that same conversation, submitted after the
+  // first response rendered, now carries a real id -- but that id has never
+  // been seen by conversationTurnCounts, so it would also start at turn 1,
+  // silently breaking turn numbering for every conversation past the first
+  // question. This tracks the most recently active conversation key per
+  // platform so an incoming real id can continue that anonymous counter
+  // instead of starting a new one, bounded by the same idle window used for
+  // eviction so unrelated conversations across a stale/reopened tab don't
+  // get merged.
+  private lastActiveConversationKeyByPlatform: Map<string, string> = new Map()
 
   constructor() {
     super()
@@ -147,7 +162,7 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
     }
 
     const chatbotName = question.source ?? 'unknown'
-    const turnNumber = this.nextConversationTurnNumber(question.conversation_id)
+    const turnNumber = this.nextConversationTurnNumber(chatbotName, question.conversation_id)
 
     dispatchEvent({
       name: `chatbot-question-${chatbotName}`,
@@ -504,14 +519,46 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
 
   /**
    * Returns the 1-based turn number for a question in its conversation,
-   * incrementing and persisting the per-conversation counter. Questions with
-   * no conversation_id can't be reliably ordered against each other, so they
-   * always report as turn 1 rather than sharing a counter across unrelated
-   * conversations.
+   * incrementing and persisting the per-conversation counter.
+   *
+   * A conversation's first question always arrives with no conversation_id
+   * (the platform hasn't assigned/exposed one yet at submit time), so it's
+   * tracked under a per-platform anonymous placeholder key rather than
+   * unconditionally returning 1 -- that placeholder's count is what a later
+   * question in the same conversation reconciles onto once a real id
+   * appears (see below), so turn numbering survives the id transition
+   * instead of silently restarting at 1.
    */
-  private nextConversationTurnNumber(conversationId: string | null | undefined): number {
+  private nextConversationTurnNumber(chatbotName: string, conversationId: string | null | undefined): number {
+    const anonymousKey = `__anon__:${chatbotName}`
+
     if (!conversationId) {
-      return 1
+      const previousCount = this.conversationTurnCounts.get(anonymousKey) ?? 0
+      const turnNumber = previousCount + 1
+      this.conversationTurnCounts.set(anonymousKey, turnNumber)
+      this.conversationTurnLastSeenAt.set(anonymousKey, Date.now())
+      this.lastActiveConversationKeyByPlatform.set(chatbotName, anonymousKey)
+      return turnNumber
+    }
+
+    // First time this real id is seen: if the platform's most recently
+    // active conversation was still the anonymous placeholder (i.e. no
+    // other real conversation has started on this platform since), treat
+    // this as that same conversation gaining an id, and continue its count
+    // rather than starting a fresh one at turn 1. Bounded by the idle
+    // window so a stale placeholder from an unrelated, long-finished
+    // conversation can't be reconciled onto a new one.
+    if (!this.conversationTurnCounts.has(conversationId)) {
+      const lastActiveKey = this.lastActiveConversationKeyByPlatform.get(chatbotName)
+      if (lastActiveKey === anonymousKey) {
+        const anonymousLastSeenAt = this.conversationTurnLastSeenAt.get(anonymousKey) ?? 0
+        if (Date.now() - anonymousLastSeenAt <= this.CONVERSATION_TURN_IDLE_TIMEOUT_MS) {
+          const carriedCount = this.conversationTurnCounts.get(anonymousKey) ?? 0
+          this.conversationTurnCounts.set(conversationId, carriedCount)
+          this.conversationTurnCounts.delete(anonymousKey)
+          this.conversationTurnLastSeenAt.delete(anonymousKey)
+        }
+      }
     }
 
     const previousCount = this.conversationTurnCounts.get(conversationId) ?? 0
@@ -519,6 +566,7 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
 
     this.conversationTurnCounts.set(conversationId, turnNumber)
     this.conversationTurnLastSeenAt.set(conversationId, Date.now())
+    this.lastActiveConversationKeyByPlatform.set(chatbotName, conversationId)
 
     return turnNumber
   }
