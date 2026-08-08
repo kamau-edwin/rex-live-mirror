@@ -337,13 +337,19 @@ export class ChatGPTParser implements ChatbotParser {
       }
     }
 
-    // MANDATORY: Copy button MUST appear on the latest turn - hard completion signal
+    // Copy button is the preferred completion signal, but it can render late
+    // for a real, complete response (confirmed live: not a stale selector,
+    // not auth-gated -- a transient DOM-render timing gap). Allow a bounded
+    // number of rechecks so a late-rendering button doesn't permanently
+    // withhold this response (and, via the batch-transmit gate, the rest of
+    // the session's queued interactions) -- see browser.mts's
+    // FORCE_PROMOTABLE_REASONS for the force-promotion ceiling.
     if (!hasCopyResponseButton) {
       console.log('[ChatGPTParser] Response incomplete - copy button not found on latest turn (awaiting completion)')
       return {
         completed: false,
         reason: 'copy_button_missing',
-        shouldRecheck: false,
+        shouldRecheck: true,
       }
     }
 

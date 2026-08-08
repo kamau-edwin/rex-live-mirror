@@ -1603,7 +1603,25 @@ class LLMChatbotBrowserModule extends REXClientModule {
           const completionDecision = this.parser.getCompletionDecision(interaction.content) as ChatGPTCompletionDecision
           const completionRecheckKey = this.getCompletionRecheckKey(this.parser.name, nextTurnNumber)
           const completionAttempts = this.completionRecheckAttempts.get(completionRecheckKey) || 0
-          const canForcePromotionAfterRetries = completionDecision.reason === 'stability_pending'
+          // Reasons where real (or plausibly-real) content already exists and
+          // only the completion SIGNAL is uncertain -- safe to force-promote
+          // after bounded retries rather than withhold forever. Excludes
+          // 'streaming' (still genuinely generating -- promoting would
+          // capture a truncated response) and 'selector_validation_failed'
+          // (can't trust the DOM structure at all, nothing safe to promote).
+          // Added after pilot data showed 'copy_button_missing' with no
+          // retry/timeout path could permanently withhold an entire
+          // session's interactions when the copy button rendered late for a
+          // real, complete response (confirmed via live audit: the button
+          // itself is not selector-stale or auth-gated, so a transient
+          // render-timing gap is the remaining explanation).
+          const FORCE_PROMOTABLE_REASONS: ChatGPTCompletionDecision['reason'][] = [
+            'stability_pending',
+            'copy_button_missing',
+            'empty_assistant_content',
+            'truncated_marker',
+          ]
+          const canForcePromotionAfterRetries = FORCE_PROMOTABLE_REASONS.includes(completionDecision.reason)
 
           if (!completionDecision.completed) {
             if (
