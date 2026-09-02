@@ -614,6 +614,25 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       return
     }
 
+    // resolveCaptureRoot failing is not itself proof a real conversation is
+    // missing on this page -- it just means the scoped container selector
+    // hasn't matched (e.g. the very first tick right after page load, before
+    // any custom element has mounted yet). Without this check, this interval
+    // fires immediately on setup (see startPeriodicFullPageCapture) and
+    // unconditionally ships the entire bare-page/app-shell HTML -- and,
+    // downstream, the service worker defaults a missing captureType to 'qa'
+    // (page-html-capture/service-worker.mts), so this raw last-resort dump
+    // was indistinguishable from a genuine validated Q&A snapshot. Reuse the
+    // same hasQAContent guard captureAndSend's own full-page-fallback branch
+    // already relies on.
+    if (!this.hasQAContent(platform)) {
+      state.lastCheckedAtMs = now
+      console.log('[Page HTML Capture] Skipping periodic full-page capture - no Q&A content found', {
+        platform,
+      })
+      return
+    }
+
     const pageHtml = await this.captureFullPageFromTabWithRetries()
     if (!pageHtml) {
       state.lastCheckedAtMs = now
@@ -908,6 +927,15 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       url: window.location.href,
       timestamp: now,
       isFinal,
+      // Without this, the service worker's capture-type derivation
+      // (page-html-capture/service-worker.mts: `typeof capture.captureType
+      // === 'string' ? capture.captureType : 'qa'`) silently defaulted every
+      // full-page-fallback capture to 'qa', indistinguishable downstream
+      // from a genuine validated Q&A snapshot -- and left
+      // shouldDispatchCapture's captureType === 'full_page' branch (a
+      // dedicated per-platform enabled-check for full-page captures)
+      // permanently unreachable from this call site.
+      captureType: 'full_page',
       pageHtmlLength: pageHtml.length,
       pageHtml,
       correlationId: this.getActiveCorrelationId(now),
