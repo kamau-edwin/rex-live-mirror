@@ -776,6 +776,25 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
         return
       }
 
+      // A resolved captureRoot is not proof a conversation actually exists --
+      // containerSelector commonly includes a generic app-shell landmark
+      // (e.g. Gemini's "[role='main']" fallback when its custom
+      // "chat-window-content" element hasn't mounted yet) that matches the
+      // bare pre-conversation page just as readily as a real Q&A container.
+      // Without this check, a beforeunload fired while navigating through
+      // that empty shell (landing page -> /app -> first real conversation)
+      // got shipped as a captureType: 'qa' snapshot despite containing no
+      // question or response at all. Reuse the same hasQAContent guard the
+      // full-page-fallback path above already relies on, so an app-shell
+      // match with no actual Q&A content on the page is skipped here too.
+      if (!this.hasQAContent(platform)) {
+        console.log('[Page HTML Capture] Skipping capture - container resolved but no Q&A content found', {
+          platform,
+          url: window.location.href,
+        })
+        return
+      }
+
       const captureType = 'qa'
       const pageHtml = captureRoot.outerHTML
 
