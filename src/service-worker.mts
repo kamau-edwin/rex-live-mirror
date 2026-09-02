@@ -332,14 +332,58 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
       }
 
       if (interaction?.type === 'response') {
-        const pendingQuestion = this.pendingQuestionByConversation.get(conversationKey)
+        let pendingQuestion = this.pendingQuestionByConversation.get(conversationKey)
+        let matchedConversationKey = conversationKey
+
+        // Some platforms (confirmed live on Perplexity) can replace their own
+        // "real" conversation/search ID between question submission and
+        // response arrival -- e.g. a provisional ID in the URL at submit time
+        // later settling to a different canonical ID once the result page
+        // finishes loading. That's a different failure mode than the "no id
+        // yet" case above (which starts as null/local- and is handled by
+        // conversationTurnCounts' anonymous-placeholder reconciliation and
+        // checkUrlChange's backfill): here BOTH ids look like real,
+        // plausible conversation ids, so this response's conversationKey
+        // simply doesn't match the key the question was filed under, and it
+        // would otherwise be dropped as unpaired -- confirmed live: a
+        // Perplexity first-turn response arrived under a different id than
+        // its own question and was silently discarded. Only fall back when
+        // exactly one pending question exists for this platform (turns are
+        // answered one at a time per platform tab, so a single pending
+        // question is a safe, unambiguous match) and it's recent enough to
+        // plausibly be this response's question, not some other stale,
+        // separately-orphaned one.
+        if (!pendingQuestion) {
+          const sameSourceCandidates: string[] = []
+          for (const [key, question] of this.pendingQuestionByConversation.entries()) {
+            if (question?.source === interaction?.source) {
+              sameSourceCandidates.push(key)
+            }
+          }
+
+          if (sameSourceCandidates.length === 1) {
+            const candidateKey = sameSourceCandidates[0]
+            const candidateQuestion = this.pendingQuestionByConversation.get(candidateKey)
+            const candidateAgeMs = Date.now() - (this.questionTimestamps.get(candidateKey) ?? 0)
+
+            if (candidateAgeMs <= this.ORPHANED_QUESTION_TIMEOUT_MS) {
+              console.log(
+                `[LLM Chatbot] Response conversation id (${interaction.conversation_id}) did not match its `
+                + `question's id -- pairing with the sole pending ${interaction?.source} question instead `
+                + `(question conversation: ${candidateQuestion?.conversation_id})`
+              )
+              pendingQuestion = candidateQuestion
+              matchedConversationKey = candidateKey
+            }
+          }
+        }
 
         if (pendingQuestion) {
           // Validate timestamp ordering before correlation
           const validationResult = this.validateTimestampOrdering(pendingQuestion, interaction)
           if (!validationResult.isValid) {
             // Clock skew detected: response arrived before question
-            this.storeEarlyResponse(conversationKey, interaction)
+            this.storeEarlyResponse(matchedConversationKey, interaction)
             markTransmitted(interaction)
             continue
           }
@@ -355,8 +399,8 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
               // Skip: either no new sources, or sources were already present before
               markTransmitted(pendingQuestion)
               markTransmitted(interaction)
-              this.pendingQuestionByConversation.delete(conversationKey)
-              this.questionTimestamps.delete(conversationKey) // Clean up timestamp tracking
+              this.pendingQuestionByConversation.delete(matchedConversationKey)
+              this.questionTimestamps.delete(matchedConversationKey) // Clean up timestamp tracking
               console.log(`[LLM Chatbot] Skipped duplicate qa_pair from ${interaction.source} (conversation: ${interaction.conversation_id})`)
               continue
             }
@@ -416,8 +460,8 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
 
           markTransmitted(pendingQuestion)
           markTransmitted(interaction)
-          this.pendingQuestionByConversation.delete(conversationKey)
-          this.questionTimestamps.delete(conversationKey) // Clean up timestamp tracking
+          this.pendingQuestionByConversation.delete(matchedConversationKey)
+          this.questionTimestamps.delete(matchedConversationKey) // Clean up timestamp tracking
           this.transmittedQaHashes.add(qaHash)
           
           // Track if this hash was transmitted with sources
