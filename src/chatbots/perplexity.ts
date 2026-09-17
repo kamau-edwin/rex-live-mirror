@@ -90,6 +90,16 @@ export class PerplexityParser implements ChatbotParser {
   // concurrent second call for the same response bails out immediately.
   private inFlightExtractionResponseIds = new Set<string>()
   private panelOpenedByParserForResponseId: string | undefined = undefined
+  // Keyed by the QUESTION content whose response resolved into chrome text
+  // (not the chrome text itself, which is always the same one or two known
+  // strings and would collapse every occurrence into one dedup key). Ensures
+  // the "unrecoverable capture failure" signal fires once per affected
+  // question, not once per MutationObserver poll while the wall stays on
+  // screen -- confirmed in production data this can persist for the rest of
+  // the session once hit, since it reflects a session/auth-state block, not
+  // a rendering delay a later poll would resolve on its own the way
+  // ChatGPT's transient chrome text does.
+  private reportedUnrecoverableChromeForQuestion = new Set<string>()
   private responseContainerIds = new Map<Element, string>()
   private responseContainerSequence = 0
   private questionTimestampsByContentIndex = new Map<string, number>()
@@ -620,6 +630,34 @@ export class PerplexityParser implements ChatbotParser {
   }
 
   /**
+   * Tells the extension's content script (browser.ts, outside this package)
+   * that a question's response resolved into known chrome text with no
+   * usable answer, and that this is NOT expected to resolve on its own --
+   * unlike ChatGPT's transient states, there is no later DOM mutation to
+   * wait for here. The content script uses this to decide whether to show
+   * the participant a fallback banner, as a last resort once a silent
+   * DOM re-check genuinely cannot help.
+   */
+  private reportUnrecoverableCaptureFailure(questionContent: string, chromeContent: string): void {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(chrome.runtime.sendMessage as any)({
+        messageType: 'llmUnrecoverableCaptureFailure',
+        payload: {
+          source: 'perplexity',
+          reason: 'signup_wall',
+          questionContent,
+          chromeContent,
+          timestamp: Date.now(),
+          url: window.location.href,
+        }
+      })
+    } catch (e) {
+      console.error('[PerplexityParser] Failed to report unrecoverable capture failure:', e)
+    }
+  }
+
+  /**
    * Validate that current selectors can find elements on the page
    * Useful for detecting if DOM structure has changed and selectors need updating
    */
@@ -681,6 +719,21 @@ export class PerplexityParser implements ChatbotParser {
       // picked up here as if it were the answer -- it isn't one.
       if (isChromeOnlyContent(content, PERPLEXITY_CHROME_PATTERNS)) {
         console.log('[PerplexityParser] Skipping chrome-only response content:', content)
+        // Unlike ChatGPT's transient "Searching the web" state (which
+        // resolves on its own once the DOM mutates again -- see
+        // extractInteractions()'s ChatGPT equivalent), this wall reflects a
+        // session/auth-state block: production data confirmed it does not
+        // resolve into a real answer on a later poll for the rest of the
+        // session. No amount of re-checking the DOM will fix it, so report
+        // it once per affected question so the extension can fall back to
+        // telling the participant, instead of silently losing the response
+        // the way the 2026-09 pilot did.
+        const lastQuestion = [...interactions].reverse().find((i) => i.type === 'question')
+        const questionKey = lastQuestion?.content ?? '(unknown question)'
+        if (!this.reportedUnrecoverableChromeForQuestion.has(questionKey)) {
+          this.reportedUnrecoverableChromeForQuestion.add(questionKey)
+          this.reportUnrecoverableCaptureFailure(questionKey, content)
+        }
         return
       }
 

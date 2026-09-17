@@ -132,4 +132,54 @@ test.describe('ChatGPTParser', () => {
     const gasPricesResponse = [...responseContents].find((c) => c.toLowerCase().includes('gas price'))
     expect(gasPricesResponse).toBeUndefined()
   })
+
+  test('a turn that was chrome-only on first extraction is captured correctly once the real answer renders', async ({ page }) => {
+    // Production data (2026-09 pilot behavior analysis) shows the chatbot
+    // almost always DOES finish rendering a real answer a few seconds to
+    // just over a minute after a "Searching the web"/reasoning-timer state
+    // -- the participant stayed on the chatbot tab the whole time in every
+    // observed case. extractInteractions() dropping chrome-only content
+    // (rather than capturing it) means that turn produces NO interaction at
+    // all on the poll that catches the transient chrome state, so it isn't
+    // marked "seen" anywhere -- the live extension's MutationObserver-driven
+    // recapture on the next DOM change (browser.mts's characterData-watching
+    // observer) gets an unblocked second look. This test proves that
+    // mechanism at the parser level: calling extractInteractions() again
+    // after the DOM mutates from chrome-only to a real answer must return
+    // the real answer, with no special-cased "retry" logic needed in the
+    // parser itself.
+    const firstPassResponses = await page.evaluate((selectors) => {
+      const ParserCtor = (window as unknown as { __ChatGPTParser: new (config: unknown) => { extractInteractions: () => Array<{ type: string; content: string }> } }).__ChatGPTParser
+      const parser = new ParserCtor({ selectors, fallback_mode: 'append' })
+      ;(window as unknown as { __persistentParser: unknown }).__persistentParser = parser
+      return parser.extractInteractions().filter((i) => i.type === 'response')
+    }, CHATGPT_SELECTORS)
+
+    // First pass: turn 2 (gas prices) contributes nothing yet.
+    expect(firstPassResponses.some((r) => r.content.toLowerCase().includes('gas price'))).toBe(false)
+
+    // Simulate the chatbot finishing its response: the "Searching the web"
+    // status pill is replaced by the real prose element, exactly as ChatGPT
+    // mutates the turn 2 container in production once generation completes.
+    await page.evaluate(() => {
+      const turns = Array.from(document.querySelectorAll('li[data-message-role="assistant"]'))
+      const turn2 = turns[1]
+      const statusPill = turn2.querySelector('.status-pill')
+      statusPill?.remove()
+      const wrapper = document.createElement('div')
+      wrapper.setAttribute('data-message-author-role', 'assistant')
+      wrapper.innerHTML = '<div data-conversation-screenshot-content>Gas prices in California are currently above the national average.</div>'
+      turn2.querySelector('section')?.prepend(wrapper)
+    })
+
+    const secondPassResponses = await page.evaluate((selectors) => {
+      const parser = (window as unknown as { __persistentParser: { extractInteractions: () => Array<{ type: string; content: string }> } }).__persistentParser
+      return parser.extractInteractions().filter((i) => i.type === 'response')
+    }, CHATGPT_SELECTORS)
+
+    const recoveredResponse = secondPassResponses.find((r) => r.content.toLowerCase().includes('gas price'))
+    expect(recoveredResponse).toBeDefined()
+    expect(recoveredResponse?.content).toBe('Gas prices in California are currently above the national average.')
+    expect(recoveredResponse?.content).not.toContain('Searching the web')
+  })
 })
