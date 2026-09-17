@@ -1,8 +1,11 @@
 node_modules/
 dist/
-*.js
-*.js.map
+/src/**/*.js
+/src/**/*.js.map
 *.d.ts
 *.d.ts.map
 .DS_Store
 *src/chatbots/*.bak
+tests/src/build/
+test-results/
+playwright-report/

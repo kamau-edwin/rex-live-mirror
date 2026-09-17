@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>ChatGPT Mock Page</title>
+</head>
+<body>
+    <!--
+      Mock DOM structure replicating the ChatGPT conversation transcript,
+      built from the live production selector config (news-eval-db
+      AppConfiguration id=5, pilot_ai_off, llm_capture.platforms.chatgpt).
+      Used by chatgpt-parser.spec.ts.
+
+      Three turns:
+        1. A normal, complete turn (real answer text).
+        2. A turn where the prose selector never rendered -- only the
+           "Searching the web" status chrome is present. This is the
+           2026-09 pilot bug: extraction fell back to the turn container's
+           full text, capturing "Searching the web" as the entire response.
+        3. A turn where the prose selector DOES match, but the reasoning
+           timer text ("Worked for 41s") is concatenated directly inside
+           the SAME data-conversation-screenshot-content node, immediately
+           before the real answer with no separator -- this is the exact
+           shape confirmed in production data (interaction_response_content
+           = "Worked for 41sYes — the article you pasted is real...").
+           Proves the fix must strip a chrome PREFIX from matched content,
+           not just avoid the container-textContent fallback.
+    -->
+    <div id="history">
+        <ol data-conversation-transcript>
+
+            <!-- Turn 1: normal question + complete answer -->
+            <li data-message-role="user">
+                <div data-message-author-role="user" data-user-message-copy>What is the capital of France?</div>
+            </li>
+            <li data-message-role="assistant" aria-busy="false">
+                <section data-turn="assistant">
+                    <div data-message-author-role="assistant">
+                        <div data-conversation-screenshot-content>The capital of France is Paris.</div>
+                    </div>
+                    <button data-testid="copy-turn-action-button">Copy</button>
+                </section>
+            </li>
+
+            <!-- Turn 2: question submitted, but only the web-search status
+                 chrome rendered -- no data-conversation-screenshot-content
+                 node exists yet in this turn's container. -->
+            <li data-message-role="user">
+                <div data-message-author-role="user" data-user-message-copy>What are gas prices in California right now?</div>
+            </li>
+            <li data-message-role="assistant" aria-busy="false">
+                <section data-turn="assistant">
+                    <div class="status-pill">Searching the web</div>
+                    <button data-testid="copy-turn-action-button">Copy</button>
+                </section>
+            </li>
+
+            <!-- Turn 3: prose selector matches, but its textContent begins
+                 with the reasoning-timer chrome text, exactly as captured
+                 in production. -->
+            <li data-message-role="user">
+                <div data-message-author-role="user" data-user-message-copy>Is this claim about the stock market true?</div>
+            </li>
+            <li data-message-role="assistant" aria-busy="false">
+                <section data-turn="assistant">
+                    <div data-message-author-role="assistant">
+                        <div data-conversation-screenshot-content><span class="status-pill">Worked for 41s</span>Yes, the claim is accurate based on the data available.</div>
+                    </div>
+                    <button data-testid="copy-turn-action-button">Copy</button>
+                </section>
+            </li>
+
+        </ol>
+    </div>
+
+    <script type="module">
+        window.testUtilitiesReady = true
+    </script>
+    <script type="module" src="../build/chatbots-shim.bundle.js"></script>
+</body>
+</html>

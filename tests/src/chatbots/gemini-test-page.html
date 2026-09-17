@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Gemini Mock Page</title>
+</head>
+<body>
+    <!--
+      Mock DOM structure replicating the Gemini conversation transcript,
+      built from the live production selector config (news-eval-db
+      AppConfiguration id=5, pilot_ai_off, llm_capture.platforms.gemini).
+      Used by gemini-parser.spec.ts.
+
+      No confirmed capture bug exists for Gemini in the 2026-09 pilot data
+      (0/22 contaminated rows, vs. 16/36 for ChatGPT) -- this fixture is
+      proactive, not a regression proof for a known incident. It locks in
+      current correct behavior and probes the same failure SHAPE that hit
+      ChatGPT (status/chrome text ending up in captured content) to catch
+      it early if Gemini's markup ever grows the same pattern.
+
+      Three turns:
+        1. A normal, complete turn (real answer text).
+        2. A question with the "You said" screen-reader prefix Gemini adds
+           -- normalizeQuestion() already strips this; asserts that
+           continues to work.
+        3. A turn still streaming (aria-busy="true" on the response node,
+           matching busyIndicator's selector), with partial text. Confirms
+           extractInteractions() itself doesn't do completion-gating -- callers
+           are expected to check isResponseComplete() first -- and that the
+           partial text captured is exactly what's rendered, not chrome text
+           standing in for it.
+    -->
+    <div id="chat-history">
+        <div class="conversation-container">
+            <user-query-content>
+                <div class="query-content">
+                    <div class="query-text-line">What is the capital of France?</div>
+                </div>
+            </user-query-content>
+            <model-response>
+                <message-content>
+                    <div class="markdown markdown-main-panel" aria-busy="false">The capital of France is Paris.</div>
+                </message-content>
+                <div class="response-footer complete"></div>
+            </model-response>
+        </div>
+
+        <div class="conversation-container">
+            <user-query-content>
+                <div class="query-content">
+                    <div class="query-text-line">You said What are gas prices in California right now?</div>
+                </div>
+            </user-query-content>
+            <model-response>
+                <message-content>
+                    <div class="markdown markdown-main-panel" aria-busy="false">Gas prices in California are currently above the national average.</div>
+                </message-content>
+                <div class="response-footer complete"></div>
+            </model-response>
+        </div>
+
+        <div class="conversation-container">
+            <user-query-content>
+                <div class="query-content">
+                    <div class="query-text-line">Is this claim about the stock market true?</div>
+                </div>
+            </user-query-content>
+            <model-response>
+                <message-content>
+                    <div class="markdown markdown-main-panel" aria-busy="true">Based on the available</div>
+                </message-content>
+            </model-response>
+        </div>
+    </div>
+
+    <script type="module">
+        window.testUtilitiesReady = true
+    </script>
+    <script type="module" src="../build/chatbots-shim.bundle.js"></script>
+</body>
+</html>

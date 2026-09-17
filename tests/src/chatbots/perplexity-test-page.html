@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Perplexity Mock Page</title>
+</head>
+<body>
+    <!--
+      Mock DOM structure replicating the Perplexity conversation transcript,
+      built from the live production selector config (news-eval-db
+      AppConfiguration id=5, pilot_ai_off, llm_capture.platforms.perplexity).
+      Used by perplexity-parser.spec.ts.
+
+      Two turns:
+        1. A normal, complete turn (real answer text).
+        2. A turn where Perplexity showed its signup/rate-limit wall instead
+           of a real answer. This is the 2026-09 pilot bug: "Sign up and
+           repeat your request." was captured as the ENTIRE
+           interaction_response_content for 2 participants -- the wall
+           message renders inside the same assistantResponse selector
+           (div[data-renderer="lm"]) a real answer would use.
+    -->
+    <div class="scrollable-container">
+
+        <!-- Turn 1: normal question + complete answer -->
+        <div class="group/user-bubble">
+            <span class="select-text">Have California gas prices increased since Labor Day?</span>
+        </div>
+        <div class="flex flex-col flex-1 min-w-0 gap-4">
+            <div id="markdown-content-1" data-renderer="lm">Yes, California gas prices have risen slightly since Labor Day.</div>
+            <button aria-label="Copy">Copy</button>
+        </div>
+
+        <!-- Turn 2: signup/rate-limit wall shown instead of an answer -->
+        <div class="group/user-bubble">
+            <span class="select-text">Based on U.S. envoy Jared Kushner's comments, will this affect the Israel-Gaza ceasefire talks?</span>
+        </div>
+        <div class="flex flex-col flex-1 min-w-0 gap-4">
+            <div id="markdown-content-2" data-renderer="lm">Sign up and repeat your request.</div>
+        </div>
+
+    </div>
+
+    <script type="module">
+        window.testUtilitiesReady = true
+    </script>
+    <script type="module" src="../build/chatbots-shim.bundle.js"></script>
+</body>
+</html>
