@@ -4,6 +4,7 @@
  */
 
 import type { ChatbotParser } from './parser.js'
+import { PERPLEXITY_CHROME_PATTERNS, isChromeOnlyContent } from './content-filters.js'
 
 export interface ParsedInteraction {
   type: 'question' | 'response'
@@ -673,6 +674,13 @@ export class PerplexityParser implements ChatbotParser {
     const appendResponse = (raw: string) => {
       const content = this.normalizeText(raw)
       if (!content || seenResponses.has(content)) {
+        return
+      }
+      // A signup/rate-limit wall ("Sign up and repeat your request.") can
+      // render in place of the response container's real content and gets
+      // picked up here as if it were the answer -- it isn't one.
+      if (isChromeOnlyContent(content, PERPLEXITY_CHROME_PATTERNS)) {
+        console.log('[PerplexityParser] Skipping chrome-only response content:', content)
         return
       }
 

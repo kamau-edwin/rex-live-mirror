@@ -4,6 +4,7 @@
  */
 
 import type { ChatbotParser } from './parser.js'
+import { CHATGPT_CHROME_PATTERNS, isChromeOnlyContent, stripChromePrefixes } from './content-filters.js'
 
 export interface ParsedInteraction {
   type: 'question' | 'response'
@@ -219,9 +220,25 @@ export class ChatGPTParser implements ChatbotParser {
 
       assistantTurnContainers.forEach((container) => {
         const proseElement = assistantContentSelector ? container.querySelector(assistantContentSelector) : null
-        const content = proseElement?.textContent?.trim() || container.textContent?.trim() || null
+        // Deliberately NOT falling back to container.textContent when
+        // proseElement doesn't match: the turn container also holds sibling
+        // status chrome (web-search indicator, reasoning timer, model badge,
+        // "ChatGPT said:" a11y label), so a missing prose match means the
+        // real answer isn't rendered/selectable yet, not that the container's
+        // full text is a valid substitute. Treating it as ready produced
+        // exactly this chrome text as the entire captured response.
+        //
+        // Separately: even when proseElement DOES match, confirmed in
+        // production data that chrome text (e.g. a reasoning-timer badge)
+        // can render as a leading child WITHIN that same prose element,
+        // concatenated directly onto the real answer with no separator
+        // ("Worked for 41sYes -- the article..."). stripChromePrefixes
+        // handles that case; isChromeOnlyContent below still catches turns
+        // where nothing but chrome text is present at all.
+        const rawContent = proseElement?.textContent?.trim() || null
+        const content = rawContent ? stripChromePrefixes(rawContent, CHATGPT_CHROME_PATTERNS) : null
 
-        if (content && content.length > 0) {
+        if (content && content.length > 0 && !isChromeOnlyContent(content, CHATGPT_CHROME_PATTERNS)) {
           interactions.push({
             type: 'response',
             content,
@@ -325,11 +342,15 @@ export class ChatGPTParser implements ChatbotParser {
     }
 
     const latestMarkdown = latestAssistantMsg?.querySelector(assistantContentSelector)
-    const latestContent = (latestMarkdown?.textContent || latestAssistantMsg?.textContent || '').trim()
+    // See extractInteractions(): no fallback to latestAssistantMsg.textContent
+    // here either, for the same reason -- the turn container's full text
+    // includes status chrome that isn't a real (in-progress or complete)
+    // answer.
+    const latestContent = (latestMarkdown?.textContent || '').trim()
     const hasCopyResponseButton = !!latestAssistantMsg?.querySelector(copyResponseSelector)
 
-    if (!latestContent) {
-      console.log('[ChatGPTParser] Response incomplete - empty assistant content')
+    if (!latestContent || isChromeOnlyContent(latestContent, CHATGPT_CHROME_PATTERNS)) {
+      console.log('[ChatGPTParser] Response incomplete - empty or chrome-only assistant content')
       return {
         completed: false,
         reason: 'empty_assistant_content',
