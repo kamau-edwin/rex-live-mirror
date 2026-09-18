@@ -2194,7 +2194,18 @@ class LLMChatbotBrowserModule extends REXClientModule {
           // Use stored container reference when available to avoid stale content matching
           // when newer responses have appeared since this turn was enqueued.
           const updatedSources = this.parser.extractSources(pending.containerRef ?? pending.interaction.content)
-          if (updatedSources && updatedSources.length > 0) {
+          // ChatGPT's citation buttons render incrementally, one per paragraph,
+          // as the response streams -- a non-empty result here can still be a
+          // partial snapshot (e.g. 1 of several eventual sources) rather than
+          // the complete, deduplicated footer list. Only treat a non-empty
+          // result as genuinely final when the parser has no way to
+          // distinguish partial from complete (hasSourcesFootnote absent, e.g.
+          // Gemini's atomic panel read), or when it confirms the footer
+          // (complete list) specifically exists.
+          const hasFootnoteCheck = typeof this.parser?.hasSourcesFootnote === 'function'
+          const sourcesAreFinal = !hasFootnoteCheck || this.parser.hasSourcesFootnote()
+
+          if (updatedSources && updatedSources.length > 0 && sourcesAreFinal) {
             pending.unresolvedRetryCount = 0
             pending.interaction.sources = updatedSources
             if (this.parser?.name === 'gemini') {
@@ -2202,6 +2213,25 @@ class LLMChatbotBrowserModule extends REXClientModule {
             }
             console.log(
               `[LLM Chatbot Browser] Extracted ${updatedSources.length} sources`,
+            )
+          } else if (updatedSources && updatedSources.length > 0) {
+            // Partial result: keep it as the current best-effort answer (in
+            // case retries exhaust before the footer ever appears) but do not
+            // reset the retry counter or fall through to promotion yet.
+            pending.interaction.sources = updatedSources
+            console.log(
+              `[LLM Chatbot Browser] Extracted ${updatedSources.length} sources so far (footer not yet present, will retry)`,
+            )
+            const shouldCountRetryPartial = trigger === 'initial' || trigger === 'turn-retry'
+            if (shouldCountRetryPartial) {
+              pending.unresolvedRetryCount += 1
+            }
+            if (pending.unresolvedRetryCount < this.MAX_PENDING_SOURCE_RETRIES) {
+              this.armTurnScopedRetry(prefixKey, pending)
+              continue
+            }
+            console.warn(
+              `[LLM Chatbot Browser] Source footer unresolved after ${pending.unresolvedRetryCount} retries; promoting with ${updatedSources.length} sources found so far`,
             )
           } else {
             if (typeof this.parser?.isSourceExtractionComplete === 'function') {

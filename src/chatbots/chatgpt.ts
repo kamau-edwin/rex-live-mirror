@@ -519,6 +519,20 @@ export class ChatGPTParser implements ChatbotParser {
     return []
   }
 
+  // Distinguishes "found the complete, deduplicated footer list" from "only
+  // found partial inline citation buttons so far" -- citations render
+  // incrementally, one per paragraph, as the response streams, so an early
+  // retry pass can see 1 button while more are still about to appear.
+  // browser.mts's retry loop treats ANY non-empty extractSources() result as
+  // final for every parser; without this check it stopped retrying the
+  // moment it saw that first inline button, undercounting sources for
+  // logged-out ChatGPT specifically. Confirmed live (2026-09-18): an
+  // interaction landed with exactly 1 source when the same response had
+  // several distinct citations rendered moments later.
+  hasSourcesFootnote(): boolean {
+    return document.querySelector('button[data-content-reference-type="sources_footnote"][data-assistant-sources-payload]') !== null
+  }
+
   private extractSourcesFromAnchorsAndText(): ExtractedSource[] {
     const sources: ExtractedSource[] = []
     const visitedUrls = new Set<string>()
