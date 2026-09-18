@@ -34,6 +34,17 @@ export interface LLMInteraction {
   sources_html?: string  // Raw sources-panel HTML, captured alongside extraction (Perplexity only, so far)
   panelCycleConfirmed?: boolean  // MutationObserver validation: did panel open→close?
   panelCycleTimestamp?: { opened: number; closed: number; duration: number }  // Timing proof
+  // Two independently-derived login-state signals, recorded for
+  // cross-validation rather than picked as a single source of truth --
+  // url_login_state is parsed from url itself (platform's own routing
+  // decision, e.g. ChatGPT's /c/ vs /uc/ path prefix), dom_login_state is a
+  // fresh document.querySelector check against the platform's configured
+  // login_detection selectors at the moment of capture. Both computed
+  // per-interaction (not cached from page load) so a mid-session login/
+  // logout is reflected correctly. Any future disagreement between the two
+  // is itself a signal worth investigating rather than a value to trust.
+  url_login_state?: 'logged_in' | 'logged_out' | 'unknown'
+  dom_login_state?: 'logged_in' | 'logged_out' | 'unknown'
 }
 
 /**
@@ -58,6 +69,12 @@ interface PendingSourceExtractionInfo {
 class LLMChatbotBrowserModule extends REXClientModule {
   private enabled: boolean = false
   private parser: any = null
+  // Raw resolved platform config for the active parser, kept around solely so
+  // login_detection selectors are available to re-derive dom_login_state
+  // fresh at each interaction capture -- login_detection is not exposed on
+  // this.parser itself (parser constructors only read .selectors/
+  // .fallback_mode/.selector_fallbacks from this).
+  private activePlatformConfig: any = null
   private mutationObserver: MutationObserver | null = null
   private interactions: LLMInteraction[] = []
   // Track responses pending source extraction: key = prefixKey, value = { interaction, containerRef, turnRetryObserver }
@@ -290,6 +307,30 @@ class LLMChatbotBrowserModule extends REXClientModule {
     return true
   }
 
+  // Derived from the URL alone -- ChatGPT's own routing decision
+  // (/c/<id> for a real, logged-in conversation vs /uc/<id> for the
+  // logged-out "unauthenticated conversation" flow), confirmed live
+  // (2026-09-18) as a 100% clean split across every captured interaction
+  // this session, no other path shape observed. Kept separate from
+  // detectLoginStateFromSelectors() (a DOM-selector check) deliberately --
+  // recording both signals lets any future disagreement between them be
+  // caught in the data itself rather than trusting either signal blindly.
+  private detectLoginStateFromUrl(url: string): 'logged_in' | 'logged_out' | 'unknown' {
+    try {
+      const path = new URL(url).pathname
+      if (path.startsWith('/uc/')) {
+        return 'logged_out'
+      }
+      if (path.startsWith('/c/')) {
+        return 'logged_in'
+      }
+    } catch (error) {
+      console.warn('[LLM Chatbot Browser] Login-state URL parse failed:', error)
+    }
+
+    return 'unknown'
+  }
+
   private detectLoginStateFromSelectors(platformConfig: any): 'logged_in' | 'logged_out' | 'unknown' { // eslint-disable-line @typescript-eslint/no-explicit-any
     try {
       const loggedInSelector = typeof platformConfig?.login_detection?.loggedInSelector === 'string'
@@ -318,6 +359,19 @@ class LLMChatbotBrowserModule extends REXClientModule {
     }
 
     return 'unknown'
+  }
+
+  // Combines both signals for the currently active parser/platform, for
+  // tagging onto a captured interaction. detectLoginStateFromUrl()'s
+  // /c//uc/ scheme is ChatGPT-specific -- deliberately not applied for
+  // other platforms, where it would just misleadingly return 'unknown'
+  // for every URL shape rather than a meaningful signal.
+  private detectCurrentLoginStates(url: string): { urlState: 'logged_in' | 'logged_out' | 'unknown'; domState: 'logged_in' | 'logged_out' | 'unknown' } {
+    const domState = this.detectLoginStateFromSelectors(this.activePlatformConfig)
+    const urlState = this.parser?.name === 'chatgpt'
+      ? this.detectLoginStateFromUrl(url)
+      : 'unknown'
+    return { urlState, domState }
   }
 
   private extractSelectorsFromAuditPrimary(primary: any): Record<string, string> | null { // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -512,6 +566,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
         this.hostMatchesConfiguredHosts(host, perplexityHosts)
       ) {
         this.parser = new PerplexityParser(perplexityConfig)
+        this.activePlatformConfig = perplexityConfig
         console.log('[LLM Chatbot Browser] Perplexity parser initialized with config')
       } else if (
         enabledSources.includes('chatgpt') &&
@@ -519,6 +574,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
         this.hostMatchesConfiguredHosts(host, chatgptHosts)
       ) {
         this.parser = new ChatGPTParser(chatgptConfig)
+        this.activePlatformConfig = chatgptConfig
         console.log('[LLM Chatbot Browser] ChatGPT parser initialized with config')
       } else if (
         enabledSources.includes('gemini') &&
@@ -527,6 +583,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
         geminiCaptureEligible
       ) {
         this.parser = new GeminiParser(geminiConfig)
+        this.activePlatformConfig = geminiConfig
         console.log('[LLM Chatbot Browser] Gemini parser initialized with config')
       } else if (
         enabledSources.includes('claude') &&
@@ -534,6 +591,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
         this.hostMatchesConfiguredHosts(host, claudeHosts)
       ) {
         this.parser = new ClaudeParser(claudeConfig)
+        this.activePlatformConfig = claudeConfig
         console.log('[LLM Chatbot Browser] Claude parser initialized with config')
       } else {
         console.log('[LLM Chatbot Browser] No matching enabled chatbot parser for URL:', currentURL)
@@ -1923,6 +1981,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
 
           // Longer content - this is an update of the previous capture
           const newId = this.generateInteractionId()
+          const updateLoginStates = this.detectCurrentLoginStates(window.location.href)
           const newInteraction: LLMInteraction = {
             interaction_id: newId,
             updates_interaction_id: existingCapture.interaction_id,  // Reference original
@@ -1938,6 +1997,8 @@ class LLMChatbotBrowserModule extends REXClientModule {
             sources: interaction.type === 'response' ? extractedSources : [],
             source_extraction: interaction.type === 'response' ? sourceExtractionState : undefined,
             sources_html: interaction.type === 'response' ? extractedSourcesHtml : undefined,
+            url_login_state: updateLoginStates.urlState,
+            dom_login_state: updateLoginStates.domState,
           }
           if (newInteraction.type === 'response') {
             pageCaptureModule.setCorrelationId(newId)
@@ -1964,6 +2025,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
         } else {
           // New content - first capture
           const newId = this.generateInteractionId()
+          const loginStates = this.detectCurrentLoginStates(window.location.href)
           const newInteraction: LLMInteraction = {
             interaction_id: newId,
             source: this.parser.name,
@@ -1978,6 +2040,8 @@ class LLMChatbotBrowserModule extends REXClientModule {
             sources: interaction.type === 'response' ? extractedSources : [],
             source_extraction: interaction.type === 'response' ? sourceExtractionState : undefined,
             sources_html: interaction.type === 'response' ? extractedSourcesHtml : undefined,
+            url_login_state: loginStates.urlState,
+            dom_login_state: loginStates.domState,
           }
           if (newInteraction.type === 'response') {
             pageCaptureModule.setCorrelationId(newId)

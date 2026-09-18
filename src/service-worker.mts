@@ -417,6 +417,13 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
             correlation_id: interaction.interaction_id ?? interaction.updates_interaction_id ?? null,
             question_timestamp: pendingQuestion.question_timestamp ?? pendingQuestion.timestamp ?? null,
             response_timestamp: interaction.timestamp ?? null,
+            // Two independently-derived login-state signals -- see
+            // LLMInteraction's own fields in browser.mts for why both are
+            // kept rather than collapsed into one. interactionPayload is an
+            // explicit allow-list, not a pass-through, so these were
+            // silently dropped before reaching the backend until added here.
+            url_login_state: interaction.url_login_state ?? 'unknown',
+            dom_login_state: interaction.dom_login_state ?? 'unknown',
             question: {
               content: pendingQuestion.content,
               length: pendingQuestion.length ?? pendingQuestion.content?.length ?? 0,
