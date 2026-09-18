@@ -2020,9 +2020,22 @@ class LLMChatbotBrowserModule extends REXClientModule {
           }
           this.schedulePersistCheckpoint()
 
-          // For responses without sources extracted, hold only for panel-based parsers when
-          // parser has not yet finalized source extraction for this specific turn.
+          // For responses without sources extracted, hold for panel-based parsers
+          // (sourceToggleButton, e.g. Gemini) and for citation-payload parsers
+          // (citationElements, e.g. ChatGPT) when parser has not yet finalized
+          // source extraction for this specific turn. Confirmed live
+          // (2026-09-18): a logged-out ChatGPT response with real sources
+          // visibly rendered in the page (data-assistant-sources-trigger
+          // buttons with populated payloads) still landed with sources: []
+          // on the backend, because this hold only ever applied to
+          // sourceToggleButton parsers -- ChatGPT has no toggle button, so a
+          // response promoted before its citation buttons finished rendering
+          // was never retried, same class of premature-capture race already
+          // fixed for Perplexity's responseContainer and ChatGPT's own
+          // streamActive/writingBlock completion markers.
           const hasPanelSourceToggle = !!this.parser?.selectors?.sourceToggleButton
+          const hasCitationSelector = !!this.parser?.selectors?.citationElements
+          const hasSourceMechanism = hasPanelSourceToggle || hasCitationSelector
           const containerRef: Element | undefined = responseContainerRef
           const sourceExtractionComplete =
             newInteraction.type === 'response' &&
@@ -2033,7 +2046,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
           if (
             newInteraction.type === 'response' &&
             this.parser?.name !== 'perplexity' &&
-            hasPanelSourceToggle &&
+            hasSourceMechanism &&
             (!newInteraction.sources || newInteraction.sources.length === 0) &&
             !sourceExtractionComplete
           ) {
@@ -2145,13 +2158,15 @@ class LLMChatbotBrowserModule extends REXClientModule {
     for (const [prefixKey, pending] of this.pendingSourcesExtraction.entries()) {
       // Check if sources button is visible (sources ready to extract) for panel-based parsers only.
       const sourcesButtonSelector = this.parser?.selectors?.sourceToggleButton
+      const hasCitationSelector = !!this.parser?.selectors?.citationElements
 
-      // Non-panel chatbots (no sourceToggleButton configured) should not wait on Gemini-specific selectors.
-      if (!sourcesButtonSelector) {
+      // Chatbots with neither a panel toggle nor a citation selector have no
+      // source mechanism at all -- nothing to retry, promote immediately as before.
+      if (!sourcesButtonSelector && !hasCitationSelector) {
         this.interactions.push(pending.interaction)
         promotedCount++
         toRemove.push(prefixKey)
-        console.log('[LLM Chatbot Browser] No source toggle selector for parser - promoting response immediately')
+        console.log('[LLM Chatbot Browser] No source toggle or citation selector for parser - promoting response immediately')
 
         if (this.interactions.length >= this.batchSize) {
           console.log(`[LLM Chatbot Browser] Batch full after promotion, triggering transmission`)
@@ -2160,11 +2175,15 @@ class LLMChatbotBrowserModule extends REXClientModule {
         continue
       }
 
-      const sourcesButtonVisible = pending.containerRef
-        ? pending.containerRef.querySelector(sourcesButtonSelector) !== null
-        : !!document.querySelector(sourcesButtonSelector)
+      // Citation-payload parsers (e.g. ChatGPT) have no toggle button to check
+      // visibility on -- fall through to the extraction attempt below on every pass.
+      const sourcesButtonVisible = sourcesButtonSelector
+        ? (pending.containerRef
+            ? pending.containerRef.querySelector(sourcesButtonSelector) !== null
+            : !!document.querySelector(sourcesButtonSelector))
+        : true
 
-      if (!sourcesButtonVisible) {
+      if (sourcesButtonSelector && !sourcesButtonVisible) {
         console.log('[LLM Chatbot Browser] Source toggle not visible for pending turn; attempting extraction anyway')
       }
 
