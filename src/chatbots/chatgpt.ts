@@ -445,7 +445,18 @@ export class ChatGPTParser implements ChatbotParser {
       ? 'button[data-content-reference-type="sources_footnote"][data-assistant-sources-payload]'
       : 'button[data-assistant-sources-trigger][data-assistant-sources-payload]'
 
-    const buttons = document.querySelectorAll(selector)
+    // Scoped to the LATEST assistant turn only -- querying document-wide
+    // picked up earlier turns' sources_footnote/trigger buttons too, since
+    // ChatGPT keeps every prior turn's footer button in the DOM as the
+    // conversation grows. Confirmed live (2026-09-18): a second turn with a
+    // factual, no-citation answer ("what is thujone") still landed with the
+    // FIRST turn's 8 web-search sources verbatim, because this queried the
+    // whole document and found turn 1's still-present footnote button.
+    const latestTurnContainer = this.getLatestAssistantTurnContainer()
+
+    const buttons = latestTurnContainer
+      ? latestTurnContainer.querySelectorAll(selector)
+      : document.querySelectorAll(selector)
     const sources: ExtractedSource[] = []
     const visitedUrls = new Set<string>()
 
@@ -519,6 +530,16 @@ export class ChatGPTParser implements ChatbotParser {
     return []
   }
 
+  // Scoped to the latest assistant turn only, for the same reason
+  // extractSourcesFromPayloadButtons() is -- ChatGPT keeps every prior
+  // turn's DOM nodes around as the conversation grows.
+  private getLatestAssistantTurnContainer(): Element | null {
+    const assistantTurnSelector = this.resolveSelector('assistantTurnContainer')
+    if (!assistantTurnSelector) return null
+    const containers = document.querySelectorAll(assistantTurnSelector)
+    return containers.length > 0 ? containers[containers.length - 1] : null
+  }
+
   // Distinguishes "found the complete, deduplicated footer list" from "only
   // found partial inline citation buttons so far" -- citations render
   // incrementally, one per paragraph, as the response streams, so an early
@@ -530,7 +551,11 @@ export class ChatGPTParser implements ChatbotParser {
   // interaction landed with exactly 1 source when the same response had
   // several distinct citations rendered moments later.
   hasSourcesFootnote(): boolean {
-    return document.querySelector('button[data-content-reference-type="sources_footnote"][data-assistant-sources-payload]') !== null
+    const selector = 'button[data-content-reference-type="sources_footnote"][data-assistant-sources-payload]'
+    const latestTurnContainer = this.getLatestAssistantTurnContainer()
+    return latestTurnContainer
+      ? latestTurnContainer.querySelector(selector) !== null
+      : document.querySelector(selector) !== null
   }
 
   private extractSourcesFromAnchorsAndText(): ExtractedSource[] {
