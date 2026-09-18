@@ -1172,7 +1172,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
     pendingEntry.turnRetryObserver = undefined
   }
 
-  private isTurnScopedSourceMutation(node: Node | null | undefined, sourceDetailSelector?: string): boolean {
+  private isTurnScopedSourceMutation(node: Node | null | undefined, sourceDetailSelector?: string, citationSelectors?: string[]): boolean {
     if (!node) {
       return false
     }
@@ -1189,6 +1189,14 @@ class LLMChatbotBrowserModule extends REXClientModule {
       '.all-sources',
       '.sources-list',
       'inline-source-card',
+      // Citation chips themselves (e.g. Gemini's source-inline-chip) are a
+      // qualifying mutation too, not just an already-open sources panel --
+      // confirmed live (2026-09-18) that these chips can render 80+ seconds
+      // after the initial extraction attempt found none, well past the
+      // 900ms fallback timer, and previously nothing else re-armed a retry
+      // once that timer had already fired and disconnected, since this
+      // filter only recognized panel-related selectors as relevant.
+      ...(citationSelectors ?? []),
     ].filter(Boolean) as string[]
 
     return panelSelectors.some((selector) => {
@@ -1206,14 +1214,18 @@ class LLMChatbotBrowserModule extends REXClientModule {
     }
 
     const sourceDetailSelector = this.parser?.selectors?.sourceDetailAnchors
+    const citationSelectors = [
+      this.parser?.selectors?.sourceToggleButton,
+      this.parser?.selectors?.sourceButtons,
+    ].filter((selector): selector is string => typeof selector === 'string' && selector.length > 0)
     const observer = new MutationObserver((mutations) => {
       const sawRelevantMutation = mutations.some((mutation) => {
-        if (this.isTurnScopedSourceMutation(mutation.target, sourceDetailSelector)) {
+        if (this.isTurnScopedSourceMutation(mutation.target, sourceDetailSelector, citationSelectors)) {
           return true
         }
 
         const changedNodes = Array.from(mutation.addedNodes).concat(Array.from(mutation.removedNodes))
-        return changedNodes.some((node) => this.isTurnScopedSourceMutation(node, sourceDetailSelector))
+        return changedNodes.some((node) => this.isTurnScopedSourceMutation(node, sourceDetailSelector, citationSelectors))
       })
 
       if (!sawRelevantMutation) {
