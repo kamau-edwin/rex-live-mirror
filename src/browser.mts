@@ -904,7 +904,39 @@ class LLMChatbotBrowserModule extends REXClientModule {
         })
       }, 1000)
 
-      console.log('[LLM Chatbot Browser] Event-driven transmission started (mutation-driven promotions with bounded completion self-rechecks)')
+      // Last-turn safety net: transmission here is otherwise purely
+      // mutation-driven (no periodic timer), which is fine while the page
+      // keeps mutating but leaves the FINAL turn of a session stranded if
+      // nothing mutates again afterward -- confirmed live (2026-09-18,
+      // Gemini): a fully-formed, already-parser-verified-complete response
+      // sat captured in this.interactions but never got another
+      // processPage() pass to correlate/transmit it, because the page went
+      // quiet once the participant stopped interacting. ChatGPT's
+      // scheduleCompletionRecheck() doesn't cover this -- that's a bounded
+      // ~1s retry for "is the completion SIGNAL just slow", not "nothing
+      // will ever ask again." Single-fire event listeners (not a recurring
+      // interval, which would need its own reentrancy story) mirror the
+      // already-proven pattern in page-html-capture/browser.mts's
+      // handleVisibilityChange/handleBeforeUnload -- processPage() already
+      // guards itself against concurrent runs via processInFlight, so this
+      // is safe to call unconditionally whenever it fires, backgrounded tab
+      // included: a response can keep resolving while hidden, so this must
+      // not be skipped just because the tab isn't visible.
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          void this.processPage().catch((error) => {
+            console.error('[LLM Chatbot Browser] Error in visibilitychange final-flush pass:', error)
+          })
+        }
+      }, { passive: true })
+
+      window.addEventListener('pagehide', () => {
+        void this.processPage().catch((error) => {
+          console.error('[LLM Chatbot Browser] Error in pagehide final-flush pass:', error)
+        })
+      }, { passive: true })
+
+      console.log('[LLM Chatbot Browser] Event-driven transmission started (mutation-driven promotions with bounded completion self-rechecks, plus a visibilitychange/pagehide last-turn safety net)')
     } catch (error) {
       console.error('[LLM Chatbot Browser] Error starting capture:', error)
     }
