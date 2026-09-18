@@ -1718,6 +1718,23 @@ class LLMChatbotBrowserModule extends REXClientModule {
             ? this.parser.resolveContainer(interaction.content)
             : undefined
 
+        // TEMP DIAGNOSTIC (2026-09-18): tracing a suspected Perplexity
+        // infinite-loop where the completion-recheck cycle restarts from
+        // attempt 1/3 forever instead of terminating, with "Pending for
+        // transmission: 0" throughout. Hypothesis: resolveContainer()
+        // returns a different Element identity each pass (DOM remount),
+        // so getOrCreateResponseContainerKey() mints a new key every time,
+        // prefixKey never matches capturedPrefixes, and the interaction is
+        // perpetually treated as brand new. Remove after confirming.
+        if (interaction.type === 'response' && this.parser?.name === 'perplexity' && responseContainerRef) {
+          const existingKey = this.responseContainerKeys.get(responseContainerRef)
+          console.log(
+            `[DIAG] Perplexity responseContainerRef identity: ${existingKey ? 'REUSED key ' + existingKey : 'NEW (no existing key yet)'}, ` +
+            `tracked container count=${this.responseContainerKeys.size}, ` +
+            `content_prefix=${interaction.content.slice(0, 40).replace(/\s+/g, ' ')}`,
+          )
+        }
+
         // Parser-owned completion decisions gate response capture.
         if (
           interaction.type === 'response' &&
