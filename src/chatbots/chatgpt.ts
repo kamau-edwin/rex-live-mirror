@@ -434,10 +434,80 @@ export class ChatGPTParser implements ChatbotParser {
     return this.getCompletionDecision().completed
   }
 
+  // footnoteOnly=true reads only the response-footer button
+  // (data-content-reference-type="sources_footnote"), which carries the
+  // complete, already-deduplicated source list for the whole response.
+  // footnoteOnly=false reads every inline per-paragraph citation button
+  // instead (data-assistant-sources-trigger without that footer attribute),
+  // used as a fallback when no footer button is present yet.
+  private extractSourcesFromPayloadButtons(footnoteOnly: boolean): ExtractedSource[] {
+    const selector = footnoteOnly
+      ? 'button[data-content-reference-type="sources_footnote"][data-assistant-sources-payload]'
+      : 'button[data-assistant-sources-trigger][data-assistant-sources-payload]'
+
+    const buttons = document.querySelectorAll(selector)
+    const sources: ExtractedSource[] = []
+    const visitedUrls = new Set<string>()
+
+    buttons.forEach((button) => {
+      const raw = button.getAttribute('data-assistant-sources-payload')
+      if (!raw) return
+
+      let payload: unknown
+      try {
+        payload = JSON.parse(raw)
+      } catch (error) {
+        console.warn('[ChatGPTParser] Failed to parse sources payload:', error)
+        return
+      }
+
+      if (!Array.isArray(payload)) return
+
+      payload.forEach((entry) => {
+        if (!entry || typeof entry !== 'object') return
+        const url = typeof (entry as Record<string, unknown>).url === 'string' ? (entry as Record<string, unknown>).url as string : undefined
+        if (!url || visitedUrls.has(url)) return
+
+        const title =
+          (typeof (entry as Record<string, unknown>).title === 'string' && (entry as Record<string, unknown>).title as string) ||
+          (typeof (entry as Record<string, unknown>).attribution === 'string' && (entry as Record<string, unknown>).attribution as string) ||
+          url
+
+        visitedUrls.add(url)
+        sources.push({ source_title: title, source_url: url })
+      })
+    })
+
+    return sources
+  }
+
   extractSources(): ExtractedSource[] {
     if (this.selectorValidationError) {
       console.error('[ChatGPTParser] Cannot extract sources - selector validation failed:', this.selectorValidationError)
       return []
+    }
+
+    // ChatGPT's web-search citations are not <a href> anchors at all -- confirmed
+    // live (2026-09-18) via full-document capture: every citation is a
+    // <button data-assistant-sources-trigger data-assistant-sources-payload="[...]">
+    // whose payload is a JSON array of {title, url, attribution}. The response
+    // footer additionally carries one button with
+    // data-content-reference-type="sources_footnote" whose payload is the
+    // complete, already-deduplicated list for the whole response -- read that
+    // first since it avoids re-deriving dedup across every inline citation
+    // button ourselves. This is why citationElements (an a[href] selector)
+    // always found zero matches even when a visible sources button was present:
+    // there was never a plain anchor tag to match in the first place.
+    const footnotePayloadSources = this.extractSourcesFromPayloadButtons(true)
+    if (footnotePayloadSources.length > 0) {
+      console.log(`[ChatGPTParser] Extracted ${footnotePayloadSources.length} sources from sources_footnote payload`)
+      return footnotePayloadSources
+    }
+
+    const inlinePayloadSources = this.extractSourcesFromPayloadButtons(false)
+    if (inlinePayloadSources.length > 0) {
+      console.log(`[ChatGPTParser] Extracted ${inlinePayloadSources.length} sources from inline citation payloads`)
+      return inlinePayloadSources
     }
 
     const sources: ExtractedSource[] = []
