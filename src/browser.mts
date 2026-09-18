@@ -1692,7 +1692,30 @@ class LLMChatbotBrowserModule extends REXClientModule {
           typeof this.parser.isResponseComplete === 'function' &&
           !this.parser.isResponseComplete(interaction.content)
         ) {
-          continue
+          // Bare skip with no retry, unlike ChatGPT's bounded
+          // recheck/force-promote path above -- confirmed live (2026-09-18)
+          // this can permanently drop a genuinely-complete Perplexity
+          // response: extractInteractions() found real, final content (the
+          // saved HTML snapshot showed a real answer with the copy button
+          // correctly nested under it), but no further DOM mutation fired
+          // after the one processPage() pass where isResponseComplete()
+          // still returned false, so it was never rechecked and the
+          // interaction was dropped for the rest of the session. Reusing
+          // the same bounded recheck/force-promote mechanism here closes
+          // that gap the same way copy_button_missing was closed for
+          // ChatGPT, without needing a parser-specific reason enum.
+          const completionRecheckKey = this.getCompletionRecheckKey(this.parser.name, nextTurnNumber)
+          const completionAttempts = this.completionRecheckAttempts.get(completionRecheckKey) || 0
+
+          if (completionAttempts < this.MAX_COMPLETION_RECHECK_ATTEMPTS) {
+            this.scheduleCompletionRecheck(completionRecheckKey, 'response_incomplete', this.COMPLETION_RECHECK_DELAY_MS)
+            continue
+          }
+
+          console.warn(
+            `[LLM Chatbot Browser] Completion unresolved after ${this.MAX_COMPLETION_RECHECK_ATTEMPTS} attempts; promoting latest response snapshot (response_incomplete)`,
+          )
+          this.clearCompletionRecheck(completionRecheckKey)
         }
 
         // Generate a scoped key for this content.
