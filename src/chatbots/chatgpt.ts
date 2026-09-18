@@ -631,7 +631,22 @@ export class ChatGPTParser implements ChatbotParser {
     if (!linkSelector) {
       return []
     }
-    const linkElements = document.querySelectorAll(linkSelector)
+    // Scoped to the LATEST assistant turn only -- citationElements
+    // ("section[data-turn=\"assistant\"] a[href^=\"http\"]") matches every
+    // past turn's citations too when queried document-wide, since ChatGPT
+    // keeps every prior turn's DOM nodes in the transcript as the
+    // conversation grows. Confirmed live (2026-09-18) in a LOGGED-IN
+    // session: turn 2, a plain factual answer with no citations at all
+    // ("what is thujone"), still landed with turn 1's 11 web-search sources
+    // verbatim, because this queried the whole document and found turn 1's
+    // still-present citation anchors. Same class of bug already fixed for
+    // the payload-button fallback path below -- this is the anchor-based
+    // primary path (proven working for logged-in otherwise) that needed
+    // the same scoping.
+    const latestTurnContainerForAnchors = this.getLatestAssistantTurnContainer()
+    const linkElements = latestTurnContainerForAnchors
+      ? latestTurnContainerForAnchors.querySelectorAll(linkSelector)
+      : document.querySelectorAll(linkSelector)
 
     linkElements.forEach((element) => {
       const url = normalizeSourceUrl(element.getAttribute('href'))
@@ -657,9 +672,15 @@ export class ChatGPTParser implements ChatbotParser {
       sources.push({ source_title: title, source_url: url })
     })
 
+    // Same cross-turn leak risk as the anchor pass above -- scope this
+    // regex-over-text fallback to the latest turn only too, otherwise a
+    // URL appearing in an EARLIER turn's raw response text (not just its
+    // citation anchors) could still leak into a later turn's source list.
     const assistantSelector = this.resolveSelector('assistantMessage')
     const assistantMessages: Element[] = assistantSelector
-      ? Array.from(document.querySelectorAll(assistantSelector))
+      ? (latestTurnContainerForAnchors
+          ? Array.from(latestTurnContainerForAnchors.querySelectorAll(assistantSelector))
+          : Array.from(document.querySelectorAll(assistantSelector)))
       : []
     const urlRegex = /https?:\/\/[^\s<>"{}|\\^`[\]]+/g
 
