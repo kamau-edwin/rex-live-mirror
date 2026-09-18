@@ -1187,7 +1187,19 @@ export class GeminiParser implements ChatbotParser {
       }
 
       if (menuReportedNoSources && sourceDetailAnchors.length === 0) {
-        return finalizeEmptySources('[GeminiParser] More menu exposed no View sources action for this turn - finalizing with empty sources')
+        // Deliberately NOT calling finalizeEmptySources here -- that locks
+        // in via extractedResponseIds.add(), the same permanent-on-first-
+        // check pattern already fixed for the "no source affordance"
+        // branch above. Confirmed live (2026-09-18): the More menu can
+        // report no "View sources" item purely because citation chips
+        // have not rendered into the DOM yet (source-inline-chip count
+        // went from 0 at this check to 7 just 10 seconds later), not
+        // because the response genuinely has none. Returning [] without
+        // locking lets the outer retry loop in browser.mts (bounded by
+        // MAX_PENDING_SOURCE_RETRIES) re-attempt the menu probe on a
+        // later pass instead of promoting empty sources permanently.
+        console.log('[GeminiParser] More menu exposed no View sources action yet; returning empty sources for this pass (not marked complete)')
+        return []
       }
 
       // If citation affordances or a sources toggle exist for this turn, do not finalize
