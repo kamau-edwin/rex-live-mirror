@@ -2248,6 +2248,17 @@ class LLMChatbotBrowserModule extends REXClientModule {
           continue
         }
 
+        // A retry is already armed and waiting on a DOM mutation (or its
+        // fallback timer) for this turn -- don't launch a redundant
+        // extraction attempt (and burn unresolvedRetryCount) just because an
+        // unrelated 'general' mutation elsewhere on the page re-invoked this
+        // function in the meantime. Matches the ChatGPT/Gemini branch's
+        // shouldCountRetry gating below, which only counts 'initial' and
+        // 'turn-retry' triggers, not every 'general' pass.
+        if (pending.turnRetryObserver) {
+          continue
+        }
+
         const extractSourcesFn = this.parser?.extractSources
         if (typeof extractSourcesFn !== 'function') {
           this.disconnectTurnRetryObserver(pending)
