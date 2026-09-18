@@ -274,6 +274,30 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
     return null
   }
 
+  // URL-only login-state signal for the snapshot capture, kept independent
+  // of the DOM-selector based detectLoginStateFromSelectors() in
+  // browser.mts's LLMChatbotBrowserModule -- this module has no access to
+  // that module's parser/login_detection config (page_html_capture's own
+  // backend config block has no login_detection of its own, and this
+  // module runs standalone), but ChatGPT's own routing (/c/<id> logged-in
+  // vs /uc/<id> logged-out) needs no config at all. Recorded on the
+  // snapshot so a failure isolated to one generator (e.g. interaction or
+  // question capture breaking) still leaves a record of the login state
+  // the snapshot itself was captured under.
+  private detectLoginStateFromUrl(platform: string, url: string): 'logged_in' | 'logged_out' | 'unknown' {
+    if (platform !== 'chatgpt') {
+      return 'unknown'
+    }
+    try {
+      const path = new URL(url).pathname
+      if (path.startsWith('/uc/')) return 'logged_out'
+      if (path.startsWith('/c/')) return 'logged_in'
+    } catch (error) {
+      console.warn('[Page HTML Capture] Login-state URL parse failed:', error)
+    }
+    return 'unknown'
+  }
+
   private getSnapshotSelectors(platform: string): SnapshotSelectors | null {
     const captureSelectors = this.config?.platformConfigs?.[platform]?.snapshotSelectors
     if (captureSelectors?.question && captureSelectors?.response) {
@@ -869,6 +893,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
         pageHtmlLength: validatedHtml.length,
         pageHtml: validatedHtml,
         correlationId: this.getActiveCorrelationId(now),
+        url_login_state: this.detectLoginStateFromUrl(platform, window.location.href),
       }
 
       // Send to service worker
@@ -939,6 +964,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
       pageHtmlLength: pageHtml.length,
       pageHtml,
       correlationId: this.getActiveCorrelationId(now),
+      url_login_state: this.detectLoginStateFromUrl(platform, window.location.href),
     }
 
     await chrome.runtime.sendMessage({
@@ -1127,6 +1153,7 @@ class PageHtmlCaptureBrowserModule extends REXClientModule {
           pageHtmlLength: pageHtml.length,
           pageHtml,
           correlationId: this.getActiveCorrelationId(now),
+          url_login_state: this.detectLoginStateFromUrl(platform, window.location.href),
         }
 
         await chrome.runtime.sendMessage({

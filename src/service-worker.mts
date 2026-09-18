@@ -179,6 +179,13 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
         content: question.content,
         length: question.length ?? question.content.length,
       },
+      // Same two independently-derived login-state signals recorded on
+      // chatbot-interaction-* (see browser.mts) -- also recorded here so a
+      // failure isolated to one generator (e.g. interaction extraction
+      // breaking) still leaves a record of the login state the question
+      // itself was captured under.
+      url_login_state: question.url_login_state ?? 'unknown',
+      dom_login_state: question.dom_login_state ?? 'unknown',
     })
 
     console.log('[LLM Chatbot] Dispatched chatbot-question-' + chatbotName, '(conversation:', question.conversation_id, ', turn:', turnNumber, ')')

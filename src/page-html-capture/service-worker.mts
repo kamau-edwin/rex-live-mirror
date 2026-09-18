@@ -27,6 +27,11 @@ export interface PageHtmlCapture {
   correlationId?: string | null
   source?: string
   generatorId?: string
+  // URL-derived login-state signal, computed by the browser-context module
+  // (see browser.mts's detectLoginStateFromUrl) -- recorded here purely for
+  // downstream analysis, so a capture still carries login-state context
+  // even if question or interaction capture fails for the same turn.
+  url_login_state?: 'logged_in' | 'logged_out' | 'unknown'
 }
 
 export interface PageHtmlCaptureStorageConfig {
@@ -433,6 +438,11 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
         correlation_id: capture.correlationId ?? null,
         is_final: capture.isFinal === true,
         title: null,
+        // URL-derived login-state signal (see browser.mts's
+        // detectLoginStateFromUrl) -- recorded so a snapshot still carries
+        // login-state context even if question or interaction capture
+        // fails for the same turn.
+        url_login_state: capture.url_login_state ?? 'unknown',
       },
     })
 

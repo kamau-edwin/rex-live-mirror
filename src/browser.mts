@@ -633,6 +633,8 @@ class LLMChatbotBrowserModule extends REXClientModule {
       submitted_at_ms: number
       content: string
       length: number
+      url_login_state?: 'logged_in' | 'logged_out' | 'unknown'
+      dom_login_state?: 'logged_in' | 'logged_out' | 'unknown'
     },
     origin: 'submit-listener' | 'dom-scan-fallback',
   ): void {
@@ -682,6 +684,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
     this.lastSubmittedQuestionAtMs = now
     this.dispatchedQuestionKeys.add(dedupeKey)
 
+    const submitListenerLoginStates = this.detectCurrentLoginStates(window.location.href)
     const payload = {
       source: this.parser?.name || 'unknown',
       url: window.location.href,
@@ -689,6 +692,8 @@ class LLMChatbotBrowserModule extends REXClientModule {
       submitted_at_ms: now,
       content: trimmed,
       length: trimmed.length,
+      url_login_state: submitListenerLoginStates.urlState,
+      dom_login_state: submitListenerLoginStates.domState,
     }
 
     this.sendQuestionSubmittedMessage(payload, 'submit-listener')
@@ -2071,6 +2076,8 @@ class LLMChatbotBrowserModule extends REXClientModule {
                 submitted_at_ms: newInteraction.timestamp,
                 content: newInteraction.content,
                 length: newInteraction.length,
+                url_login_state: newInteraction.url_login_state,
+                dom_login_state: newInteraction.dom_login_state,
               }, 'dom-scan-fallback')
             }
           }
