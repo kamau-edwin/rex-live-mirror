@@ -204,7 +204,15 @@ export class ChatGPTParser implements ChatbotParser {
       const userMessages = document.querySelectorAll(userMessageSelector)
       console.log(`[ChatGPTParser] Found ${userMessages.length} user message elements`)
       userMessages.forEach((msg) => {
-        const content = msg.textContent?.trim()
+        // ChatGPT renders a "You said:" accessibility label inside the same
+        // node as the user's own message text, so raw textContent captures
+        // it as a prefix. This produced a second, differently-worded
+        // chatbot-question dispatch for the same submission: the submit-time
+        // listener already captured the clean typed text, and this DOM-scan
+        // path's dedupe key (built from this content) didn't match it since
+        // the strings differed, so both got sent to the backend as separate
+        // questions. Confirmed live (2026-09-18).
+        const content = stripChromePrefixes(msg.textContent?.trim() || '', CHATGPT_CHROME_PATTERNS)
         if (content && content.length > 0) {
           interactions.push({
             type: 'question',

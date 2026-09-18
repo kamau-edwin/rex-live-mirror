@@ -35,6 +35,7 @@ export const CHATGPT_CHROME_PATTERNS: ChromeTextPattern[] = [
   { pattern: /^Worked for \d+s\.*/i, description: 'reasoning-timer badge' },
   { pattern: /^(Answering|Answered) with ChatGPT( Plus preview)?\.*/i, description: 'model badge' },
   { pattern: /^ChatGPT said:\s*/i, description: 'accessibility label' },
+  { pattern: /^You said:\s*/i, description: 'user-message accessibility label' },
 ]
 
 export const PERPLEXITY_CHROME_PATTERNS: ChromeTextPattern[] = [
