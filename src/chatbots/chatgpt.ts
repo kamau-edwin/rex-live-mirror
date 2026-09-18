@@ -487,29 +487,39 @@ export class ChatGPTParser implements ChatbotParser {
       return []
     }
 
-    // ChatGPT's web-search citations are not <a href> anchors at all -- confirmed
-    // live (2026-09-18) via full-document capture: every citation is a
-    // <button data-assistant-sources-trigger data-assistant-sources-payload="[...]">
-    // whose payload is a JSON array of {title, url, attribution}. The response
-    // footer additionally carries one button with
+    const anchorSources = this.extractSourcesFromAnchorsAndText()
+    if (anchorSources.length > 0) {
+      return anchorSources
+    }
+
+    // Fallback for logged-out sessions only: confirmed live (2026-09-18) via
+    // full-document capture that logged-out ChatGPT renders web-search
+    // citations as <button data-assistant-sources-trigger
+    // data-assistant-sources-payload="[...]"> instead of plain <a href>
+    // anchors -- the anchor-based path above (proven working for logged-in
+    // sessions, left untouched) legitimately finds nothing there, not
+    // intermittently but every time, since there is no anchor tag to match.
+    // The response footer additionally carries one button with
     // data-content-reference-type="sources_footnote" whose payload is the
-    // complete, already-deduplicated list for the whole response -- read that
-    // first since it avoids re-deriving dedup across every inline citation
-    // button ourselves. This is why citationElements (an a[href] selector)
-    // always found zero matches even when a visible sources button was present:
-    // there was never a plain anchor tag to match in the first place.
+    // complete, already-deduplicated list for the whole response -- read
+    // that first since it avoids re-deriving dedup across every inline
+    // citation button ourselves.
     const footnotePayloadSources = this.extractSourcesFromPayloadButtons(true)
     if (footnotePayloadSources.length > 0) {
-      console.log(`[ChatGPTParser] Extracted ${footnotePayloadSources.length} sources from sources_footnote payload`)
+      console.log(`[ChatGPTParser] Extracted ${footnotePayloadSources.length} sources from sources_footnote payload (logged-out fallback)`)
       return footnotePayloadSources
     }
 
     const inlinePayloadSources = this.extractSourcesFromPayloadButtons(false)
     if (inlinePayloadSources.length > 0) {
-      console.log(`[ChatGPTParser] Extracted ${inlinePayloadSources.length} sources from inline citation payloads`)
+      console.log(`[ChatGPTParser] Extracted ${inlinePayloadSources.length} sources from inline citation payloads (logged-out fallback)`)
       return inlinePayloadSources
     }
 
+    return []
+  }
+
+  private extractSourcesFromAnchorsAndText(): ExtractedSource[] {
     const sources: ExtractedSource[] = []
     const visitedUrls = new Set<string>()
 
@@ -634,7 +644,7 @@ export class ChatGPTParser implements ChatbotParser {
       }
     })
 
-    console.log(`[ChatGPTParser] Extracted ${sources.length} sources`)
+    console.log(`[ChatGPTParser] Extracted ${sources.length} sources from anchors/text`)
     return sources
   }
 }
