@@ -1141,19 +1141,6 @@ export class GeminiParser implements ChatbotParser {
       console.log('[GeminiParser] Cleared panel ownership - next turn will open fresh panel')
     }
 
-    const finalizeEmptySources = (reason: string): ExtractedSourceGroup[] => {
-      // Finalized turn: if parser owns the panel for this turn, close it before exiting.
-      if (panelOwnedAtClose) {
-        closeSourcesPanelIfOpen()
-      }
-      clearPanelOwnership()
-      if (currentResponseId) { this.extractedResponseIds.add(currentResponseId) }
-      if (currentResponseId) { this.sourceExtractionStatusByResponseId.set(currentResponseId, 'none') }
-      if (currentResponseId) { this.loggedCompletedSkipResponseIds.delete(currentResponseId) }
-      console.log(reason)
-      return []
-    }
-
     // Only mark response as complete once we have at least one URL-backed source.
     if (hasUrlSourceFinal) {
       // URL-backed extraction complete for this turn: close owned panel and clear ownership.
@@ -1175,7 +1162,28 @@ export class GeminiParser implements ChatbotParser {
         return []
       }
 
-      // Some Gemini responses legitimately have no sources. Finalize those turns with empty sources.
+      // Some Gemini responses legitimately have no sources -- but this check
+      // runs synchronously on whatever pass called extractSources(), which
+      // can be before citation chips have rendered, same race as the two
+      // other finalizeEmptySources call sites already fixed (dad849d,
+      // 686b43a). !revealAttempted only means nothing was clicked yet, not
+      // that enough time has passed to be sure no source UI will ever
+      // appear. No live evidence this exact branch has misfired (unlike the
+      // other two, each confirmed by a real test), but the mechanism is
+      // identical, so applying the same fix preemptively rather than
+      // waiting to rediscover it via another failed test.
+      //
+      // Checked both local and global impact before changing this: locally,
+      // returning [] without locking routes through the same
+      // isSourceExtractionComplete()/MAX_PENDING_SOURCE_RETRIES bounded
+      // retry path in browser.mts that the other two fixes already
+      // exercised live -- a response with genuinely no source UI at all
+      // still terminates correctly, just after up to 8 retries instead of
+      // instantly, not stuck. Globally, this file has no code shared with
+      // chatgpt.ts/perplexity.ts, so this cannot affect those platforms
+      // (unlike the rex-pdk throttle removal, which touched the one shared
+      // dispatch path every generator depends on -- this is the opposite
+      // situation, an isolated per-platform file).
       if (
         citationCandidateCount === 0 &&
         sourceDetailAnchors.length === 0 &&
@@ -1183,7 +1191,8 @@ export class GeminiParser implements ChatbotParser {
         !hasFooterSourceToggleInLatestTurn &&
         !revealAttempted
       ) {
-        return finalizeEmptySources('[GeminiParser] No source citations detected for this turn - finalizing with empty sources')
+        console.log('[GeminiParser] No source citations detected yet for this turn; returning empty sources for this pass (not marked complete)')
+        return []
       }
 
       if (menuReportedNoSources && sourceDetailAnchors.length === 0) {
