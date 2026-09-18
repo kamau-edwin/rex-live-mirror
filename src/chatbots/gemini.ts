@@ -868,8 +868,20 @@ export class GeminiParser implements ChatbotParser {
       hasFooterSourceToggleInLatestTurn ||
       latestTurnSourceMenuButtons.length > 0
     if (!hasSourceAffordanceInLatestTurn) {
-      if (currentResponseId) { this.extractedResponseIds.add(currentResponseId) }
-      console.log('[GeminiParser] Latest response has no source affordance; returning empty sources for this turn')
+      // Deliberately NOT marking currentResponseId as extracted here.
+      // Citation chips can render after the response text itself settles
+      // (confirmed live 2026-09-18: a snapshot taken 44s after this check
+      // would have run showed 21 source-inline-chip matches for a turn
+      // that had none at the moment of this check). Marking complete on
+      // the first empty check made isSourceExtractionComplete() report
+      // true immediately, so browser.mts's retry loop stopped retrying
+      // and the interaction was promoted with sources: [] permanently,
+      // even though real sources appeared moments later. Returning []
+      // without marking lets the outer retry loop's own bounded
+      // retry/exhaustion counting (MAX_PENDING_SOURCE_RETRIES) decide
+      // when to give up, same as the zero-sources case for any other
+      // parser.
+      console.log('[GeminiParser] Latest response has no source affordance yet; returning empty sources for this pass (not marked complete)')
       return []
     }
 

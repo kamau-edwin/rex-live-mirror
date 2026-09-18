@@ -347,11 +347,21 @@ class LLMChatbotBrowserModule extends REXClientModule {
         ? document.querySelector(loggedOutSelector) !== null
         : false
 
-      if (hasLoggedOutMarker && !hasLoggedInMarker) {
+      // hasLoggedOutMarker checked first and wins outright when both match --
+      // previously hasLoggedInMarker won unconditionally in that case.
+      // Confirmed live (2026-09-18): a same-tab Gemini logout mid-session
+      // still reported logged_in on the following turn, because a residual
+      // logged-in-looking sidebar element (conversations-list) had not
+      // fully cleared from this Angular app's DOM yet, while the genuine
+      // "Sign in" link/viewer-signed-out flag was already present. A logged
+      // out marker existing at all is the more surprising, more explicit
+      // signal (Google's own account state, not a themeable UI element) and
+      // is trusted over a possibly-stale logged-in-looking element.
+      if (hasLoggedOutMarker) {
         return 'logged_out'
       }
 
-      if (hasLoggedInMarker || !hasLoggedOutMarker) {
+      if (hasLoggedInMarker) {
         return 'logged_in'
       }
     } catch (error) {
