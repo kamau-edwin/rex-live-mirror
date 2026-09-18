@@ -70,6 +70,7 @@ export interface SelectorValidation {
   valid: boolean
   questionsFound: number
   responsesFound: number
+  failures?: string[]
 }
 
 export class PerplexityParser implements ChatbotParser {
@@ -674,6 +675,31 @@ export class PerplexityParser implements ChatbotParser {
       responsesFound: responseElements.length,
     }
 
+    // Additive-only source-selector health check: does not affect `valid`
+    // (question/response discovery is unchanged) so it never suppresses
+    // existing capture behavior. This exists purely so a source-toggle/
+    // citation selector going stale is visible in console diagnostics
+    // instead of requiring manual snapshot archaeology to discover, as
+    // happened when the page-level Links tab was absent from a live capture
+    // with no diagnostic signal at all.
+    if (responseElements.length > 0) {
+      const failures: string[] = []
+      const sourceToggle = this.getSourceToggleGlobal()
+      const sourceDetailSelector =
+        this.resolveSelector('sourceDetailAnchors') || this.resolveSelector('citationElements') || ''
+      const inlineCitationCount = sourceDetailSelector ? document.querySelectorAll(sourceDetailSelector).length : 0
+
+      if (!sourceToggle && inlineCitationCount === 0) {
+        failures.push('sourceToggleButton: no match, and no inline citation elements found either')
+      } else if (!sourceToggle) {
+        console.log(`[PerplexityParser] No page-level source toggle found, but ${inlineCitationCount} inline citation element(s) present (fallback extraction available)`)
+      }
+
+      if (failures.length > 0) {
+        validation.failures = failures
+      }
+    }
+
     console.log('[PerplexityParser] Selector validation:', validation)
     return validation
   }
@@ -1022,6 +1048,21 @@ export class PerplexityParser implements ChatbotParser {
         if (!sourceToggle) {
           if (attempt < maxAttempts) {
             continue
+          }
+
+          // No page-level Links/Sources tab exists in this UI state (confirmed
+          // live: a captured page can have zero role="tab" elements at all,
+          // e.g. when Perplexity renders answers without that tab-bar chrome).
+          // The citations are still present as inline data-pplx-citation-url
+          // spans directly in the response body in that case, so read them
+          // straight from responseContainer instead of giving up. This only
+          // replaces a branch that previously always returned empty sources,
+          // so it cannot regress the toggle-based path above, which still
+          // runs first whenever the tab genuinely exists.
+          const inlineSourceGroups = extractSourceGroupsFromPanel(responseContainer)
+          if (inlineSourceGroups.length > 0) {
+            console.log(`[PerplexityParser] Extracted ${inlineSourceGroups.length} source groups inline (no page-level tab found)`)
+            return finalizeResult(inlineSourceGroups, 'success')
           }
 
           const inlineSourceCandidates = responseContainer.querySelectorAll(sourceDetailSelector).length > 0
