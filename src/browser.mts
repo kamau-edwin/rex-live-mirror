@@ -86,6 +86,13 @@ class LLMChatbotBrowserModule extends REXClientModule {
   private capturedPrefixes: Map<string, CapturedInteractionInfo> = new Map()
   private readonly PREFIX_LENGTH = 100  // Characters to use for prefix matching
   private readonly MAX_PENDING_SOURCE_RETRIES = 8
+  // Perplexity's extractSources() is async (Promise<SourceExtractionResult>),
+  // unlike ChatGPT/Gemini's synchronous flat-array return, so it cannot reuse
+  // the generic retry branch in promoteReadyResponses() as-is. This guards
+  // against a mutation-driven re-entry into promoteReadyResponses() launching
+  // a second overlapping extraction attempt for the same pending turn while
+  // the first attempt's promise is still in flight.
+  private perplexityRetryExtractionInFlight: Set<string> = new Set()
   private batchSize: number = 10
   private transmissionInterval: number = 60000
   private processDebounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -2138,7 +2145,6 @@ class LLMChatbotBrowserModule extends REXClientModule {
 
           if (
             newInteraction.type === 'response' &&
-            this.parser?.name !== 'perplexity' &&
             hasSourceMechanism &&
             (!newInteraction.sources || newInteraction.sources.length === 0) &&
             !sourceExtractionComplete
@@ -2225,25 +2231,112 @@ class LLMChatbotBrowserModule extends REXClientModule {
     const toRemove: string[] = []
     let promotedCount = 0
 
-    // Perplexity now resolves extraction terminally in processPage.
-    // If any stale pending entries remain from a prior runtime state, flush them safely.
+    // Perplexity's extractSources() is async and returns a richer
+    // SourceExtractionResult (not the flat array the generic branch below
+    // assumes), so it needs its own retry handling. Confirmed live: Perplexity
+    // was previously excluded from this queue entirely and flushed
+    // immediately as 'data_capture_error' on first miss, with no retry --
+    // the actual root cause of a sustained zero-sources regression once the
+    // page-level Links tab started mounting later than Perplexity's own
+    // internal 2-attempt extractSources() retry could catch. This mirrors
+    // the ChatGPT/Gemini retry-count/promote decisions below using the same
+    // MAX_PENDING_SOURCE_RETRIES bound and armTurnScopedRetry mutation
+    // observer, just adapted for the async, richer return shape.
     if (this.parser?.name === 'perplexity') {
       for (const [prefixKey, pending] of this.pendingSourcesExtraction.entries()) {
-        this.disconnectTurnRetryObserver(pending)
-        pending.interaction.source_extraction = pending.interaction.source_extraction || 'data_capture_error'
-        this.interactions.push(pending.interaction)
-        toRemove.push(prefixKey)
-        promotedCount += 1
-      }
+        if (this.perplexityRetryExtractionInFlight.has(prefixKey)) {
+          continue
+        }
 
-      for (const key of toRemove) {
-        const pendingEntry = this.pendingSourcesExtraction.get(key)
-        this.disconnectTurnRetryObserver(pendingEntry)
-        this.pendingSourcesExtraction.delete(key)
-      }
+        const extractSourcesFn = this.parser?.extractSources
+        if (typeof extractSourcesFn !== 'function') {
+          this.disconnectTurnRetryObserver(pending)
+          this.interactions.push(pending.interaction)
+          toRemove.push(prefixKey)
+          promotedCount += 1
+          continue
+        }
 
-      if (promotedCount > 0) {
-        console.log(`[LLM Chatbot Browser] Flushed ${promotedCount} stale pending Perplexity entries after terminal extraction migration`)
+        this.perplexityRetryExtractionInFlight.add(prefixKey)
+        Promise.resolve(extractSourcesFn.call(this.parser, pending.containerRef ?? pending.interaction.content))
+          .then((result: unknown) => {
+            this.perplexityRetryExtractionInFlight.delete(prefixKey)
+
+            const latestPending = this.pendingSourcesExtraction.get(prefixKey)
+            if (!latestPending) {
+              // Already promoted/removed by another path while this awaited.
+              return
+            }
+
+            if (!this.isPerplexityTerminalSourceResult(result)) {
+              // Unexpected shape -- treat like an error rather than silently dropping.
+              this.disconnectTurnRetryObserver(latestPending)
+              latestPending.interaction.source_extraction = 'data_capture_error'
+              this.interactions.push(latestPending.interaction)
+              this.pendingSourcesExtraction.delete(prefixKey)
+              if (this.interactions.length >= this.batchSize) {
+                this.transmitBatch()
+              }
+              return
+            }
+
+            if (result.sources.length > 0) {
+              this.disconnectTurnRetryObserver(latestPending)
+              latestPending.interaction.sources = result.sources
+              latestPending.interaction.source_extraction = result.source_extraction
+              latestPending.interaction.sources_html = result.sources_html
+              this.pendingSourcesExtraction.delete(prefixKey)
+              this.interactions.push(latestPending.interaction)
+              console.log(`[LLM Chatbot Browser] Perplexity pending-retry extracted ${result.sources.length} source groups`)
+              if (this.interactions.length >= this.batchSize) {
+                this.transmitBatch()
+              }
+              return
+            }
+
+            // Empty result. 'none'/'panel_opening_failure' mean the toggle or
+            // panel wasn't found yet -- worth retrying, since the tab can
+            // still mount after this pass. 'terminal_empty' means the parser
+            // itself already determined there is nothing to find (e.g. no
+            // response container) -- do not keep retrying that.
+            const retryableEmpty = result.source_extraction === 'none'
+              || result.source_extraction === 'panel_opening_failure'
+              || result.source_extraction === 'data_capture_error'
+
+            if (retryableEmpty) {
+              latestPending.unresolvedRetryCount += 1
+              if (latestPending.unresolvedRetryCount < this.MAX_PENDING_SOURCE_RETRIES) {
+                console.log(
+                  `[LLM Chatbot Browser] Perplexity pending source retry ${latestPending.unresolvedRetryCount}/${this.MAX_PENDING_SOURCE_RETRIES} (${result.source_extraction})`,
+                )
+                this.armTurnScopedRetry(prefixKey, latestPending)
+                return
+              }
+              console.warn(
+                `[LLM Chatbot Browser] Perplexity source extraction unresolved after ${latestPending.unresolvedRetryCount} retries; promoting with no sources`,
+              )
+            }
+
+            this.disconnectTurnRetryObserver(latestPending)
+            latestPending.interaction.source_extraction = result.source_extraction
+            this.pendingSourcesExtraction.delete(prefixKey)
+            this.interactions.push(latestPending.interaction)
+            if (this.interactions.length >= this.batchSize) {
+              this.transmitBatch()
+            }
+          })
+          .catch((error: unknown) => {
+            this.perplexityRetryExtractionInFlight.delete(prefixKey)
+            console.error('[LLM Chatbot Browser] Error extracting Perplexity sources (pending retry):', error)
+            const latestPending = this.pendingSourcesExtraction.get(prefixKey)
+            if (!latestPending) {
+              return
+            }
+            this.disconnectTurnRetryObserver(latestPending)
+            latestPending.interaction.source_extraction = 'data_capture_error'
+            this.pendingSourcesExtraction.delete(prefixKey)
+            this.interactions.push(latestPending.interaction)
+          })
       }
       return
     }
