@@ -136,6 +136,55 @@ export class PerplexityParser implements ChatbotParser {
     return (content || '').replace(/\s+/g, ' ').trim()
   }
 
+  // A bare element.click() only dispatches a synthetic MouseEvent of type
+  // "click" -- it does not go through the pointerdown/pointerup/mousedown/
+  // mouseup sequence a real click naturally produces. Confirmed live
+  // (2026-09-18): the Links tab trigger is reliably found and .click()'d
+  // (correct element, correct aria-controls, confirmed via a separate
+  // click-diagnostic listener), yet its tabpanel never receives
+  // data-state="active" -- while the user's own real mouse click on the
+  // same button opens it every time. Radix's current tab implementation
+  // activates on pointer events for touch/accessibility responsiveness, not
+  // only on click, so a bare .click() silently no-ops against it. Dispatch
+  // the fuller sequence so both click-based and pointer-based activation
+  // handlers are covered.
+  private simulateRealClick(element: HTMLElement): void {
+    const rect = element.getBoundingClientRect()
+    const x = rect.left + rect.width / 2
+    const y = rect.top + rect.height / 2
+    const pointerEventInit: PointerEventInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      clientX: x,
+      clientY: y,
+      pointerId: 1,
+      pointerType: 'mouse',
+      isPrimary: true,
+    }
+    const mouseEventInit: MouseEventInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      clientX: x,
+      clientY: y,
+    }
+
+    try {
+      element.dispatchEvent(new PointerEvent('pointerdown', pointerEventInit))
+    } catch {
+      // PointerEvent unsupported in this context; mouse events below still cover it.
+    }
+    element.dispatchEvent(new MouseEvent('mousedown', mouseEventInit))
+    try {
+      element.dispatchEvent(new PointerEvent('pointerup', pointerEventInit))
+    } catch {
+      // Ignore; see above.
+    }
+    element.dispatchEvent(new MouseEvent('mouseup', mouseEventInit))
+    element.click()
+  }
+
   private normalizeSelectorUnion(selector?: string): string | undefined {
     if (!selector) {
       return undefined
@@ -530,11 +579,11 @@ export class PerplexityParser implements ChatbotParser {
         ? document.querySelector(`[role="tab"][id="${prefixMatch[1]}trigger-default"]`)
         : null) as HTMLElement | null
       if (defaultTab) {
-        defaultTab.click()
+        this.simulateRealClick(defaultTab)
         return
       }
       if (toggle) {
-        toggle.click()
+        this.simulateRealClick(toggle)
         return
       }
     }
@@ -543,7 +592,7 @@ export class PerplexityParser implements ChatbotParser {
     if (configuredCloseSelector && activePanel) {
       const closeButton = activePanel.querySelector(configuredCloseSelector) as HTMLElement | null
       if (closeButton) {
-        closeButton.click()
+        this.simulateRealClick(closeButton)
         return
       }
     }
@@ -559,7 +608,7 @@ export class PerplexityParser implements ChatbotParser {
       for (const selector of closeButtonFallbackSelectors) {
         const fallbackClose = activePanel.querySelector(selector) as HTMLElement | null
         if (fallbackClose) {
-          fallbackClose.click()
+          this.simulateRealClick(fallbackClose)
           return
         }
       }
@@ -572,7 +621,7 @@ export class PerplexityParser implements ChatbotParser {
     {
       const toggle = this.getSourceToggleGlobal()
       if (toggle) {
-        toggle.click()
+        this.simulateRealClick(toggle)
         return
       }
     }
@@ -857,7 +906,7 @@ export class PerplexityParser implements ChatbotParser {
         ? document.querySelector(configuredCloseSelector) as HTMLElement | null
         : null
       if (staleCloseButton) {
-        staleCloseButton.click()
+        this.simulateRealClick(staleCloseButton)
         this.panelOpenedByParserForResponseId = undefined
       }
     }
@@ -1075,7 +1124,7 @@ export class PerplexityParser implements ChatbotParser {
         const panelAlreadyVisible = !!this.findOpenSourcesPanel()
         if (!panelAlreadyVisible) {
           if (!this.panelOpenedByParserForResponseId || this.panelOpenedByParserForResponseId === currentResponseId) {
-            sourceToggle.click()
+            this.simulateRealClick(sourceToggle)
             this.panelOpenedByParserForResponseId = currentResponseId
           } else {
             return finalizeResult([], 'panel_opening_failure')
