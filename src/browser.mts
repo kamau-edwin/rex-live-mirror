@@ -81,6 +81,22 @@ class LLMChatbotBrowserModule extends REXClientModule {
   // containerRef pins extraction to the original turn element, avoiding stale content matching during later promotions.
   private pendingSourcesExtraction: Map<string, PendingSourceExtractionInfo> = new Map()
   private sourceRetryExhaustedKeys: Set<string> = new Set()
+  // Confirmed live (2026-09-18): the completion-recheck gate below could
+  // cycle "attempt 1/3 -> 2/3 -> 3/3 -> promoting" and then restart from 1/3
+  // again for the same response, hundreds of times in one session, with
+  // "Pending for transmission: 0" throughout -- the response never actually
+  // reached the transmission queue despite repeatedly "promoting". Root
+  // cause: clearCompletionRecheck() resets completionRecheckAttempts to 0 on
+  // BOTH the success path and the give-up-after-exhaustion path, and the key
+  // is scoped by turn ordinal (getCompletionRecheckKey), not by content --
+  // if the same content is ever re-seen as "new" on a later pass (e.g. a
+  // container re-resolution or ordinal shift), the exhausted counter looks
+  // fresh again and the whole gate restarts. This set is content-keyed (via
+  // getResponseRetryGuardKey, stable across container remounts, same as
+  // sourceRetryExhaustedKeys above) and permanent -- once a response's
+  // completion-recheck is exhausted, it is never gated again regardless of
+  // what key/ordinal it resolves to on a later pass.
+  private completionRecheckExhaustedContentKeys: Set<string> = new Set()
   // Track captured content by prefix for update detection
   // Key: type + first N chars (normalized), Value: { interaction_id, length }
   private capturedPrefixes: Map<string, CapturedInteractionInfo> = new Map()
@@ -1743,11 +1759,18 @@ class LLMChatbotBrowserModule extends REXClientModule {
           }
         }
 
+        const completionRecheckContentKey = interaction.type === 'response'
+          ? this.getResponseRetryGuardKey(interaction.content)
+          : undefined
+        const completionRecheckPermanentlyExhausted = !!completionRecheckContentKey
+          && this.completionRecheckExhaustedContentKeys.has(completionRecheckContentKey)
+
         // Parser-owned completion decisions gate response capture.
         if (
           interaction.type === 'response' &&
           this.parser?.name === 'chatgpt' &&
-          typeof this.parser.getCompletionDecision === 'function'
+          typeof this.parser.getCompletionDecision === 'function' &&
+          !completionRecheckPermanentlyExhausted
         ) {
           const completionDecision = this.parser.getCompletionDecision(interaction.content) as ChatGPTCompletionDecision
           const completionRecheckKey = this.getCompletionRecheckKey(this.parser.name, nextTurnNumber)
@@ -1795,6 +1818,9 @@ class LLMChatbotBrowserModule extends REXClientModule {
                 `[LLM Chatbot Browser] Completion unresolved after ${this.MAX_COMPLETION_RECHECK_ATTEMPTS} attempts; promoting latest response snapshot (${completionDecision.reason})`,
               )
               this.clearCompletionRecheck(completionRecheckKey)
+              if (completionRecheckContentKey) {
+                this.completionRecheckExhaustedContentKeys.add(completionRecheckContentKey)
+              }
             } else {
               if (!canForcePromotionAfterRetries) {
                 this.clearCompletionRecheck(completionRecheckKey)
@@ -1807,6 +1833,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
         } else if (
           interaction.type === 'response' &&
           typeof this.parser.isResponseComplete === 'function' &&
+          !completionRecheckPermanentlyExhausted &&
           !this.parser.isResponseComplete(interaction.content)
         ) {
           // Bare skip with no retry, unlike ChatGPT's bounded
@@ -1833,6 +1860,9 @@ class LLMChatbotBrowserModule extends REXClientModule {
             `[LLM Chatbot Browser] Completion unresolved after ${this.MAX_COMPLETION_RECHECK_ATTEMPTS} attempts; promoting latest response snapshot (response_incomplete)`,
           )
           this.clearCompletionRecheck(completionRecheckKey)
+          if (completionRecheckContentKey) {
+            this.completionRecheckExhaustedContentKeys.add(completionRecheckContentKey)
+          }
         }
 
         // Generate a scoped key for this content.
