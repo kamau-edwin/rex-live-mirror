@@ -1721,18 +1721,26 @@ class LLMChatbotBrowserModule extends REXClientModule {
         // TEMP DIAGNOSTIC (2026-09-18): tracing a suspected Perplexity
         // infinite-loop where the completion-recheck cycle restarts from
         // attempt 1/3 forever instead of terminating, with "Pending for
-        // transmission: 0" throughout. Hypothesis: resolveContainer()
-        // returns a different Element identity each pass (DOM remount),
-        // so getOrCreateResponseContainerKey() mints a new key every time,
-        // prefixKey never matches capturedPrefixes, and the interaction is
-        // perpetually treated as brand new. Remove after confirming.
-        if (interaction.type === 'response' && this.parser?.name === 'perplexity' && responseContainerRef) {
-          const existingKey = this.responseContainerKeys.get(responseContainerRef)
-          console.log(
-            `[DIAG] Perplexity responseContainerRef identity: ${existingKey ? 'REUSED key ' + existingKey : 'NEW (no existing key yet)'}, ` +
-            `tracked container count=${this.responseContainerKeys.size}, ` +
-            `content_prefix=${interaction.content.slice(0, 40).replace(/\s+/g, ' ')}`,
-          )
+        // transmission: 0" throughout. A live test after this was first
+        // added terminated cleanly (no loop) but never printed this line at
+        // all despite response processing clearly happening -- suggesting
+        // responseContainerRef was undefined on every pass that run, not
+        // (as originally hypothesized) a fresh Element identity each pass.
+        // Logging the undefined case too until this is confirmed either way.
+        if (interaction.type === 'response' && this.parser?.name === 'perplexity') {
+          if (responseContainerRef) {
+            const existingKey = this.responseContainerKeys.get(responseContainerRef)
+            console.log(
+              `[DIAG] Perplexity responseContainerRef identity: ${existingKey ? 'REUSED key ' + existingKey : 'NEW (no existing key yet)'}, ` +
+              `tracked container count=${this.responseContainerKeys.size}, ` +
+              `content_prefix=${interaction.content.slice(0, 40).replace(/\s+/g, ' ')}`,
+            )
+          } else {
+            console.log(
+              `[DIAG] Perplexity resolveContainer() returned undefined for content_prefix=` +
+              `${interaction.content.slice(0, 40).replace(/\s+/g, ' ')}`,
+            )
+          }
         }
 
         // Parser-owned completion decisions gate response capture.

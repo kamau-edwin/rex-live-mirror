@@ -439,9 +439,21 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
               content: interaction.content,
               length: interaction.length ?? interaction.content?.length ?? 0,
               sources: interaction.sources ?? [],
-              source_extraction: Array.isArray(interaction.sources) && interaction.sources.length > 0
-                ? (interaction.source_extraction ?? 'success')
-                : 'none',
+              // Always use the parser-computed classification when present.
+              // This used to be forced to 'none' whenever sources was empty,
+              // discarding real classifications like 'panel_opening_failure'/
+              // 'data_capture_error'/'terminal_empty' the parser had already
+              // computed -- confirmed live (2026-09-18): console showed
+              // "Perplexity terminal source result: panel_opening_failure"
+              // for a response that landed on the backend as
+              // source_extraction: 'none', indistinguishable from every
+              // other empty-sources case. 'none' remains the fallback only
+              // when the parser genuinely didn't set a classification at all
+              // (e.g. platforms with no source mechanism), not merely
+              // because sources happened to be empty.
+              source_extraction: interaction.source_extraction ?? (
+                Array.isArray(interaction.sources) && interaction.sources.length > 0 ? 'success' : 'none'
+              ),
               // Raw sources-panel HTML captured alongside extraction
               // (Perplexity only, so far) -- present in addition to, not
               // instead of, the separate chatbot-html-snapshot capture with
