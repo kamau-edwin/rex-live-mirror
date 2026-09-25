@@ -1020,16 +1020,24 @@ class LLMChatbotBrowserModule extends REXClientModule {
       // not be skipped just because the tab isn't visible.
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) {
-          void this.processPage().catch((error) => {
-            console.error('[LLM Chatbot Browser] Error in visibilitychange final-flush pass:', error)
-          })
+          void this.processPage()
+            .catch((error) => {
+              console.error('[LLM Chatbot Browser] Error in visibilitychange final-flush pass:', error)
+            })
+            .finally(() => {
+              this.forceFlushPendingSourceExtractions()
+            })
         }
       }, { passive: true })
 
       window.addEventListener('pagehide', () => {
-        void this.processPage().catch((error) => {
-          console.error('[LLM Chatbot Browser] Error in pagehide final-flush pass:', error)
-        })
+        void this.processPage()
+          .catch((error) => {
+            console.error('[LLM Chatbot Browser] Error in pagehide final-flush pass:', error)
+          })
+          .finally(() => {
+            this.forceFlushPendingSourceExtractions()
+          })
       }, { passive: true })
 
       console.log('[LLM Chatbot Browser] Event-driven transmission started (mutation-driven promotions with bounded completion self-rechecks, plus a visibilitychange/pagehide last-turn safety net)')
@@ -2586,6 +2594,61 @@ class LLMChatbotBrowserModule extends REXClientModule {
     // fully-ready batch sitting in this.interactions until an unrelated DOM
     // mutation happens to re-invoke processPage().
     if (this.pendingSourcesExtraction.size === 0 && this.interactions.length > 0) {
+      this.transmitBatch()
+    }
+  }
+
+  // Confirmed live (2026-09-24, eon/eof study batch): a participant switching
+  // to a second chatbot tab while their first tab's source-extraction retry
+  // cycle was still pending caused the interaction to be permanently
+  // stranded -- lost, not just delayed. The tab's visibilitychange handler
+  // already runs one last processPage() pass, but that only picks up NEW DOM
+  // content; entries already sitting in pendingSourcesExtraction with an
+  // armed turnRetryObserver are deliberately skipped by promoteReadyResponses
+  // ('general' passes never relaunch an already-armed retry, to avoid
+  // burning the retry budget on unrelated mutations -- see the comment on
+  // that guard). Once the tab is backgrounded, Chrome throttles setTimeout
+  // firing (commonly by a minute or more), so the 900ms fallback timer
+  // armTurnScopedRetry relies on may not fire again for a long time, if ever,
+  // and no further DOM mutation will happen on an abandoned tab to trigger a
+  // fresh 'general' pass either. The interaction then never reaches
+  // this.interactions and is lost, matching all 4 participants observed with
+  // this exact before/after pattern (question on the assigned platform, tab
+  // switch, no interaction ever captured for it).
+  //
+  // Fix: called only from the tab-hide/unload paths (never from a normal
+  // mutation pass), this force-promotes every still-pending entry
+  // immediately and synchronously with whatever sources were found so far,
+  // bypassing the in-flight/armed-observer guards that correctly protect the
+  // normal retry cycle from redundant attempts. Promoting early with partial
+  // or empty sources is strictly better than losing the interaction outright
+  // -- the same tradeoff the existing "unresolved after N retries" exhaustion
+  // path already makes, just triggered by the tab going away instead of the
+  // retry count running out.
+  private forceFlushPendingSourceExtractions(): void {
+    if (this.pendingSourcesExtraction.size === 0) {
+      return
+    }
+
+    let flushedCount = 0
+    for (const [prefixKey, pending] of this.pendingSourcesExtraction.entries()) {
+      this.disconnectTurnRetryObserver(pending)
+      this.perplexityRetryExtractionInFlight.delete(prefixKey)
+
+      if (!pending.interaction.source_extraction) {
+        const hasSources = Array.isArray(pending.interaction.sources) && pending.interaction.sources.length > 0
+        pending.interaction.source_extraction = hasSources ? 'success' : 'terminal_empty'
+      }
+
+      this.interactions.push(pending.interaction)
+      this.pendingSourcesExtraction.delete(prefixKey)
+      flushedCount += 1
+    }
+
+    if (flushedCount > 0) {
+      console.warn(
+        `[LLM Chatbot Browser] Force-flushed ${flushedCount} pending source extraction(s) on tab hide/unload (would otherwise be stranded)`,
+      )
       this.transmitBatch()
     }
   }
