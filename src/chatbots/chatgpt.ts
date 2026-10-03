@@ -4,7 +4,7 @@
  */
 
 import type { ChatbotParser } from './parser.js'
-import { CHATGPT_CHROME_PATTERNS, isChromeOnlyContent, stripChromePrefixes } from './content-filters.js'
+import { CHATGPT_CHROME_PATTERNS, CHATGPT_SUFFIX_CHROME_PATTERNS, isChromeOnlyContent, stripChromePrefixes, stripChromeSuffixes } from './content-filters.js'
 
 export interface ParsedInteraction {
   type: 'question' | 'response'
@@ -212,7 +212,15 @@ export class ChatGPTParser implements ChatbotParser {
         // path's dedupe key (built from this content) didn't match it since
         // the strings differed, so both got sent to the backend as separate
         // questions. Confirmed live (2026-09-18).
-        const content = stripChromePrefixes(msg.textContent?.trim() || '', CHATGPT_CHROME_PATTERNS)
+        //
+        // Same failure mode, opposite end: hover-revealed Copy/Select-text
+        // button labels live in the same node and get appended with no
+        // separator (e.g. "...Portugal?CopySelect text"). Confirmed live
+        // (2026-10-03). Strip both ends.
+        const content = stripChromeSuffixes(
+          stripChromePrefixes(msg.textContent?.trim() || '', CHATGPT_CHROME_PATTERNS),
+          CHATGPT_SUFFIX_CHROME_PATTERNS,
+        )
         if (content && content.length > 0) {
           interactions.push({
             type: 'question',

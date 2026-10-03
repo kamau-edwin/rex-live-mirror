@@ -43,6 +43,41 @@ export const PERPLEXITY_CHROME_PATTERNS: ChromeTextPattern[] = [
   { pattern: /^Sign up to continue\.*$/i, description: 'signup wall' },
 ]
 
+// Hover-revealed action-button labels (Copy, Select text, ...) that live
+// inside the SAME node as the user's own message text on ChatGPT, appended
+// directly after it with no separator -- confirmed live (2026-10-03):
+// "What is the capital of Portugal?CopySelect text" captured as a second,
+// differently-worded chatbot-question dispatch alongside the clean
+// submit-time-captured text, the same duplicate-dispatch failure mode as
+// the "You said:" prefix fixed 2026-09-18, just at the end of the string
+// instead of the start. Kept separate from CHATGPT_CHROME_PATTERNS/
+// stripChromePrefixes rather than extending that prefix-only contract,
+// since a suffix match needs the opposite anchor and that module's own
+// doc comment is explicit about why every entry there is prefix-anchored.
+export const CHATGPT_SUFFIX_CHROME_PATTERNS: ChromeTextPattern[] = [
+  { pattern: /(Copy)?Select text$/i, description: 'hover action-button labels (Copy/Select text)' },
+]
+
+/**
+ * Repeatedly strips any known chrome SUFFIX from the end of `content`.
+ * Mirrors stripChromePrefixes but anchored to the end of the string.
+ */
+export function stripChromeSuffixes(content: string, patterns: ChromeTextPattern[]): string {
+  let result = content.trim()
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const { pattern } of patterns) {
+      const match = result.match(pattern)
+      if (match && match.index === result.length - match[0].length) {
+        result = result.slice(0, match.index).trim()
+        changed = true
+      }
+    }
+  }
+  return result
+}
+
 /**
  * True if `content` is ENTIRELY known chrome/status text with no real
  * answer alongside it (i.e. stripping every matching prefix leaves nothing).
