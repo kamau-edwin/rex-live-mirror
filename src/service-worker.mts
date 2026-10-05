@@ -1,5 +1,6 @@
 import { REXServiceWorkerModule, registerREXModule, dispatchEvent } from '@bric/rex-core/service-worker'
 import { pageHtmlCaptureModule as pageCaptureSWModule } from './page-html-capture/service-worker.mjs'
+import { isCaptureAllowed, isHistoricalSyncAllowed } from './capture-gate.mjs'
 
 /**
  * LLM Chatbot Module - Service Worker Context
@@ -106,37 +107,68 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
 
     if (message.messageType === 'llmInteractionsBatch') {
       console.log(`[LLM Chatbot] Processing interaction batch of ${message.interactions.length} items`)
-      this.handleInteractionBatch(message.interactions)
+      const interactions: any[] = Array.isArray(message.interactions) ? message.interactions : [] // eslint-disable-line @typescript-eslint/no-explicit-any
+
+      // Drop anything from a chatbot the participant hasn't chosen (or has
+      // since turned off) or from a page on their blocklist.
+      void Promise.all(interactions.map((interaction) => isCaptureAllowed(interaction?.source, interaction?.url)))
+        .then((allowed) => {
+          const permitted = interactions.filter((_interaction, index) => allowed[index])
+
+          if (permitted.length > 0) {
+            this.handleInteractionBatch(permitted)
+          }
+        })
       sendResponse({ success: true })
 
       return true
     } else if (message.messageType === 'llmChatGPTCaptureRequest') {
       console.log('[LLM Chatbot] ChatGPT capture request received')
       if (this.chatGPTCaptureManager) {
-        this.chatGPTCaptureManager.captureAndQueueData(message.data)
-          .then(() => sendResponse({ success: true }))
-          .catch((error) => {
-            console.error('[LLM Chatbot] Error capturing ChatGPT data:', error)
-            sendResponse({ success: false, error: error.message })
-          })
+        void isHistoricalSyncAllowed().then((allowedSync) => {
+          if (!allowedSync) {
+            sendResponse({ success: false, error: 'Background capture is disabled by configuration.' })
+            return
+          }
+
+          this.chatGPTCaptureManager?.captureAndQueueData(message.data)
+            .then(() => sendResponse({ success: true }))
+            .catch((error) => {
+              console.error('[LLM Chatbot] Error capturing ChatGPT data:', error)
+              sendResponse({ success: false, error: error.message })
+            })
+        })
         return true  // Async response
       }
     } else if (message.messageType === 'syncHistoricalChats') {
       console.log('[LLM Chatbot] User requested historical chat sync')
       if (this.chatGPTCaptureManager) {
-        this.chatGPTCaptureManager.syncHistoricalChatsInBackground()
-          .then(() => {
-            console.log('[LLM Chatbot] Historical sync completed')
-            sendResponse({ success: true, message: 'Historical chats synced successfully' })
-          })
-          .catch((error) => {
-            console.error('[LLM Chatbot] Error syncing historical chats:', error)
-            sendResponse({ success: false, error: error.message })
-          })
+        void isHistoricalSyncAllowed().then((allowedSync) => {
+          if (!allowedSync) {
+            sendResponse({ success: false, error: 'Historical chat sync is disabled by configuration.' })
+            return
+          }
+
+          this.chatGPTCaptureManager?.syncHistoricalChatsInBackground()
+            .then(() => {
+              console.log('[LLM Chatbot] Historical sync completed')
+              sendResponse({ success: true, message: 'Historical chats synced successfully' })
+            })
+            .catch((error) => {
+              console.error('[LLM Chatbot] Error syncing historical chats:', error)
+              sendResponse({ success: false, error: error.message })
+            })
+        })
         return true  // Async response
       }
     } else if (message.messageType === 'llmQuestionSubmitted') {
-      this.handleQuestionSubmitted(message.question)
+      const question = message.question
+
+      void isCaptureAllowed(question?.source, question?.url).then((allowed) => {
+        if (allowed) {
+          this.handleQuestionSubmitted(question)
+        }
+      })
       sendResponse({ success: true })
       return true
     }

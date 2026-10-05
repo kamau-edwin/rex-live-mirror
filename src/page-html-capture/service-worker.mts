@@ -1,4 +1,5 @@
 import { REXServiceWorkerModule, registerREXModule, dispatchEvent } from '@bric/rex-core/service-worker'
+import { isCaptureAllowed } from '../capture-gate.mjs'
 
 /**
  * Page HTML Capture Service Worker Module
@@ -389,7 +390,9 @@ class PageHtmlCaptureServiceWorkerModule extends REXServiceWorkerModule {
     const configuration = await this.fetchLatestConfiguration()
     const captureType = typeof capture.captureType === 'string' ? capture.captureType : 'qa'
 
-    if (!shouldDispatchCapture(captureUrl, configuration, { captureType, platform: capture.platform ?? null })) {
+    const participantAllows = await isCaptureAllowed(normalizeChatbotIdentifier(capture.platform), captureUrl)
+
+    if (!participantAllows || !shouldDispatchCapture(captureUrl, configuration, { captureType, platform: capture.platform ?? null })) {
       console.log('[Page HTML Capture] Dispatch skipped (host/platform not enabled or configuration unavailable).', {
         url: captureUrl,
         captureType,
