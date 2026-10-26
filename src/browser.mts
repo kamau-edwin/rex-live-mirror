@@ -126,6 +126,18 @@ class LLMChatbotBrowserModule extends REXClientModule {
   private completionRecheckAttempts: Map<string, number> = new Map()
   private readonly MAX_COMPLETION_RECHECK_ATTEMPTS = 3
   private readonly COMPLETION_RECHECK_DELAY_MS = 300
+  // Perplexity-specific override for the generic isResponseComplete()
+  // recheck/force-promote path below (ChatGPT has its own bounded recheck
+  // via getCompletionDecision() and is unaffected by this). Confirmed live
+  // (2026-10-26): the shared 3x300ms=900ms budget force-promoted a
+  // genuinely still-streaming Perplexity response, truncating a real
+  // multi-sentence answer down to its first ~49 characters -- a real
+  // participant-facing answer was still actively rendering well past
+  // 900ms. 8x1000ms=8s gives real answers enough time to finish streaming
+  // before any snapshot is force-promoted, while still bounded so a
+  // genuinely stuck response doesn't withhold forever.
+  private readonly PERPLEXITY_MAX_COMPLETION_RECHECK_ATTEMPTS = 8
+  private readonly PERPLEXITY_COMPLETION_RECHECK_DELAY_MS = 1000
   private processInFlight: boolean = false
   private processQueuedCount: number = 0
   private readonly MAX_QUEUED_PROCESS_RUNS = 5
@@ -1108,13 +1120,14 @@ class LLMChatbotBrowserModule extends REXClientModule {
     key: string,
     reason: string,
     delayMs: number = this.COMPLETION_RECHECK_DELAY_MS,
+    maxAttempts: number = this.MAX_COMPLETION_RECHECK_ATTEMPTS,
   ): void {
     if (this.completionRecheckTimers.has(key)) {
       return
     }
 
     const attempts = this.completionRecheckAttempts.get(key) || 0
-    if (attempts >= this.MAX_COMPLETION_RECHECK_ATTEMPTS) {
+    if (attempts >= maxAttempts) {
       return
     }
 
@@ -1123,7 +1136,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
       this.completionRecheckTimers.delete(key)
       this.completionRecheckAttempts.set(key, nextAttempt)
       console.log(
-        `[LLM Chatbot Browser] Completion recheck attempt ${nextAttempt}/${this.MAX_COMPLETION_RECHECK_ATTEMPTS} (${reason})`,
+        `[LLM Chatbot Browser] Completion recheck attempt ${nextAttempt}/${maxAttempts} (${reason})`,
       )
       void this.processPage().catch((error) => {
         console.error('[LLM Chatbot Browser] Error in completion recheck pass:', error)
@@ -1858,14 +1871,21 @@ class LLMChatbotBrowserModule extends REXClientModule {
           // ChatGPT, without needing a parser-specific reason enum.
           const completionRecheckKey = this.getCompletionRecheckKey(this.parser.name, nextTurnNumber)
           const completionAttempts = this.completionRecheckAttempts.get(completionRecheckKey) || 0
+          const isPerplexity = this.parser.name === 'perplexity'
+          const maxAttemptsForParser = isPerplexity
+            ? this.PERPLEXITY_MAX_COMPLETION_RECHECK_ATTEMPTS
+            : this.MAX_COMPLETION_RECHECK_ATTEMPTS
+          const recheckDelayForParser = isPerplexity
+            ? this.PERPLEXITY_COMPLETION_RECHECK_DELAY_MS
+            : this.COMPLETION_RECHECK_DELAY_MS
 
-          if (completionAttempts < this.MAX_COMPLETION_RECHECK_ATTEMPTS) {
-            this.scheduleCompletionRecheck(completionRecheckKey, 'response_incomplete', this.COMPLETION_RECHECK_DELAY_MS)
+          if (completionAttempts < maxAttemptsForParser) {
+            this.scheduleCompletionRecheck(completionRecheckKey, 'response_incomplete', recheckDelayForParser, maxAttemptsForParser)
             continue
           }
 
           console.warn(
-            `[LLM Chatbot Browser] Completion unresolved after ${this.MAX_COMPLETION_RECHECK_ATTEMPTS} attempts; promoting latest response snapshot (response_incomplete)`,
+            `[LLM Chatbot Browser] Completion unresolved after ${maxAttemptsForParser} attempts; promoting latest response snapshot (response_incomplete)`,
           )
           this.clearCompletionRecheck(completionRecheckKey)
           if (completionRecheckContentKey) {
