@@ -828,16 +828,41 @@ export class PerplexityParser implements ChatbotParser {
     }
 
     if (seenResponses.size === 0) {
+      // Must exclude the user's own question bubble the same way the
+      // primary assistantSelector does (see its :not([data-message-bubble=
+      // "right"] *):not(div.group/user-bubble *) guards in config) -- both
+      // the question and answer render through the same data-renderer="lm"
+      // markup, and the answer's node can take noticeably longer to mount
+      // than the question's. Confirmed in production data: whenever the
+      // primary selector found zero matches during that gap, this fallback
+      // (previously unscoped) picked up the question bubble instead and
+      // emitted it as a type: 'response' interaction -- which browser.mts
+      // can then force-promote as the final answer after its bounded
+      // completion-recheck budget (900ms) expires, well before slower
+      // responses finish rendering. Affected ~70-80% of real participant
+      // Perplexity turns from 2026-10-02 (when this fallback path was
+      // broadened) onward.
       const fallbackResponseSelectors = [
-        'div[data-renderer="lm"]',
-        '.prose[data-renderer="lm"]',
-        '.prose[data-renderer]'
+        'div[data-renderer="lm"]:not([data-message-bubble="right"] *):not(div.group\\/user-bubble *)',
+        '.prose[data-renderer="lm"]:not([data-message-bubble="right"] *):not(div.group\\/user-bubble *)',
+        '.prose[data-renderer]:not([data-message-bubble="right"] *):not(div.group\\/user-bubble *)',
       ]
 
       const fallbackResponses = document.querySelectorAll(fallbackResponseSelectors.join(', '))
       console.log(`[PerplexityParser] Fallback response probe found ${fallbackResponses.length} elements`)
 
+      const questionContents = new Set(interactions.filter((i) => i.type === 'question').map((i) => i.content))
+
       fallbackResponses.forEach((node) => {
+        const content = this.normalizeText(node.textContent)
+        // Defense in depth beyond the CSS exclusion above: never let a node
+        // whose text exactly matches a question just extracted in this same
+        // pass be emitted as a response, regardless of which selector or
+        // future UI variant produced it.
+        if (content && questionContents.has(content)) {
+          console.log('[PerplexityParser] Skipping fallback response node: text matches the user\'s own question')
+          return
+        }
         appendResponse(node.textContent ?? '')
       })
     }
