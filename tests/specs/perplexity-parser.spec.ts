@@ -112,6 +112,63 @@ test.describe('PerplexityParser', () => {
     expect(failureReport?.payload.questionContent).toContain('Kushner')
   })
 
+  test('fallback response probe never captures the question bubble when no answer has rendered yet', async ({ page }) => {
+    // Regression test for the 2026-10 incident: ~70-80% of real
+    // exp_ai_on/exp_ai_off Perplexity interactions were captured with
+    // response.content === question.content, because the unscoped fallback
+    // probe (used when the primary assistantResponse selector finds nothing
+    // -- the normal state for roughly the first second after a question is
+    // submitted) picked up the question bubble's own data-renderer="lm"
+    // node. Uses the #race-condition-turn fixture in isolation (a question
+    // bubble with no answer node at all) and production-shaped selectors:
+    // assistantResponse scoped to exclude [data-message-bubble="right"], so
+    // it finds nothing here and the fallback path is exercised directly.
+    const interactions = await page.evaluate(() => {
+      const selectors = {
+        copyAction: 'button[aria-label="Copy"]',
+        userQuestion: 'div[data-message-bubble="right"] [data-renderer="lm"]',
+        busyIndicator: '[aria-busy="true"]',
+        citationTitle: 'span.citation.inline[data-pplx-citation-url]',
+        citationElements: 'a[href*="http"], [data-pplx-citation-url]',
+        messageContainer: '#race-condition-turn',
+        assistantResponse: 'div[data-renderer="lm"]:not([data-message-bubble="right"] *)',
+        responseContainer: '#race-condition-turn',
+        sourceCloseButton: 'button[aria-label="Collapse sidebar"]',
+        sourceToggleButton: 'button[aria-controls$="-content-sources"]',
+        sourceDetailAnchors: 'a[href^="http"]',
+      }
+
+      // Replace the whole page body with a fixture isolated from the other
+      // tests' shared turns: current production markup renders BOTH the
+      // user's question bubble and the assistant's answer with
+      // data-renderer="lm" -- the question bubble via
+      // data-message-bubble="right", the answer unmarked. With no sibling
+      // answer node present (simulating "answer not mounted yet"), the
+      // primary assistantResponse selector above (scoped the same way
+      // production config scopes it) correctly finds nothing; the old,
+      // unscoped fallback probe then picked up the question bubble instead.
+      document.body.innerHTML = `
+        <div class="scrollable-container" id="race-condition-turn">
+          <div data-message-bubble="right">
+            <div data-renderer="lm">What is the capital of France?</div>
+          </div>
+        </div>
+      `
+
+      const ParserCtor = (window as unknown as { __PerplexityParser: new (config: unknown) => { extractInteractions: () => Array<{ type: string; content: string }> } }).__PerplexityParser
+      const parser = new ParserCtor({ selectors })
+      return parser.extractInteractions()
+    })
+
+    const questions = interactions.filter((i) => i.type === 'question')
+    const responses = interactions.filter((i) => i.type === 'response')
+
+    expect(questions.some((q) => q.content === 'What is the capital of France?')).toBe(true)
+    // The real bug: this used to be exactly one response equal to the question text.
+    expect(responses.some((r) => r.content === 'What is the capital of France?')).toBe(false)
+    expect(responses.length).toBe(0)
+  })
+
   test('does not report an unrecoverable capture failure for a normal turn', async ({ page }) => {
     const sentMessages = await page.evaluate((selectors) => {
       const captured: unknown[] = []
