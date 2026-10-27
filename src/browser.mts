@@ -2346,8 +2346,15 @@ class LLMChatbotBrowserModule extends REXClientModule {
         if (typeof extractSourcesFn !== 'function') {
           this.disconnectTurnRetryObserver(pending)
           this.interactions.push(pending.interaction)
-          toRemove.push(prefixKey)
-          promotedCount += 1
+          this.pendingSourcesExtraction.delete(prefixKey)
+          // toRemove/promotedCount (used by the generic ChatGPT/Gemini branch
+          // below) are never read for Perplexity -- this whole branch
+          // `return`s before reaching that cleanup loop, so pushing to them
+          // here was a dead no-op; the delete above plus this explicit flush
+          // check is what actually matters.
+          if (this.interactions.length >= this.batchSize || this.pendingSourcesExtraction.size === 0) {
+            this.transmitBatch()
+          }
           continue
         }
 
@@ -2368,7 +2375,17 @@ class LLMChatbotBrowserModule extends REXClientModule {
               latestPending.interaction.source_extraction = 'data_capture_error'
               this.interactions.push(latestPending.interaction)
               this.pendingSourcesExtraction.delete(prefixKey)
-              if (this.interactions.length >= this.batchSize) {
+              // Must check batchSize OR nothing-else-pending here, not just
+              // batchSize: this resolves on an async .then(), outside the
+              // processPage() tick whose own unconditional
+              // "pendingSourcesExtraction.size === 0 && interactions.length > 0"
+              // flush (see processPage()) already ran and found this entry
+              // still pending, so it never re-fires for it. Confirmed live
+              // (2026-10-26): a single-turn Perplexity session (batch never
+              // reaches batchSize=10) left a fully-extracted response sitting
+              // in this.interactions for 4.5+ hours with nothing to ever
+              // flush it, until an unrelated event finally forced a transmit.
+              if (this.interactions.length >= this.batchSize || this.pendingSourcesExtraction.size === 0) {
                 this.transmitBatch()
               }
               return
@@ -2382,7 +2399,9 @@ class LLMChatbotBrowserModule extends REXClientModule {
               this.pendingSourcesExtraction.delete(prefixKey)
               this.interactions.push(latestPending.interaction)
               console.log(`[LLM Chatbot Browser] Perplexity pending-retry extracted ${result.sources.length} source groups`)
-              if (this.interactions.length >= this.batchSize) {
+              // See the data_capture_error branch above for why this also
+              // checks pendingSourcesExtraction.size === 0, not just batchSize.
+              if (this.interactions.length >= this.batchSize || this.pendingSourcesExtraction.size === 0) {
                 this.transmitBatch()
               }
               return
@@ -2415,7 +2434,9 @@ class LLMChatbotBrowserModule extends REXClientModule {
             latestPending.interaction.source_extraction = result.source_extraction
             this.pendingSourcesExtraction.delete(prefixKey)
             this.interactions.push(latestPending.interaction)
-            if (this.interactions.length >= this.batchSize) {
+            // See the first branch in this .then() for why this also checks
+            // pendingSourcesExtraction.size === 0, not just batchSize.
+            if (this.interactions.length >= this.batchSize || this.pendingSourcesExtraction.size === 0) {
               this.transmitBatch()
             }
           })
@@ -2430,6 +2451,12 @@ class LLMChatbotBrowserModule extends REXClientModule {
             latestPending.interaction.source_extraction = 'data_capture_error'
             this.pendingSourcesExtraction.delete(prefixKey)
             this.interactions.push(latestPending.interaction)
+            // This catch block never called transmitBatch() at all -- a
+            // thrown extractSources() error left the interaction queued with
+            // nothing to flush it, the same gap as the other branches above.
+            if (this.interactions.length >= this.batchSize || this.pendingSourcesExtraction.size === 0) {
+              this.transmitBatch()
+            }
           })
       }
       return
