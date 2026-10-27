@@ -527,6 +527,30 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
               chatbot_name: chatbotName,
               secondary_identifier: chatbotName,
             })
+
+            // Perplexity's signup/rate-limit wall is reported as
+            // llmUnrecoverableCaptureFailure (see perplexity.ts's
+            // appendResponse()) on the assumption it's permanent for the rest
+            // of the session -- but confirmed live (2026-10-27) it can be
+            // transient, resolved by the participant logging in, after which
+            // capture resumes working normally. The content script's
+            // fallback "try again" banner (news_eval's browser.ts) has no
+            // other way to learn that capture has recovered, since it only
+            // ever checks "has this ever happened," so it kept telling
+            // participants to retry a question that had already succeeded --
+            // very likely the cause of some of the repeated, identical
+            // questions seen in real participant data that same night.
+            // Anything reaching this point already has real content (the
+            // same appendResponse() filters out signup-wall text before an
+            // interaction is ever enqueued), so every successful Perplexity
+            // dispatch means capture is genuinely working again right now.
+            if (chatbotName === 'perplexity') {
+              try {
+                chrome.runtime.sendMessage({ messageType: 'llmCaptureRecovered', payload: { source: chatbotName } })
+              } catch (error) {
+                console.error('[LLM Chatbot] Failed to send llmCaptureRecovered:', error)
+              }
+            }
           }
 
           markTransmitted(pendingQuestion)
