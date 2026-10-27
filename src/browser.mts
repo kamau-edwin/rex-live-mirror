@@ -1012,6 +1012,38 @@ class LLMChatbotBrowserModule extends REXClientModule {
         })
       }, 1000)
 
+      // Perplexity-specific: a recurring, bounded-per-turn periodic re-check
+      // for whenever the mutation observer has gone quiet. Confirmed live
+      // (2026-10-26): with a participant who asks a question, reads the
+      // answer, and does nothing else (no further typing, no tab close/
+      // switch), the mutation observer naturally goes quiet once Perplexity
+      // finishes streaming and its own internal UI settles -- there is no
+      // further DOM mutation to ever re-trigger processPage(). The
+      // visibilitychange/pagehide safety net added 2026-09-18 only fires on
+      // tab hide or close, so an idle-but-open, idle-but-visible tab never
+      // gets a second look at all: the response can render successfully
+      // (confirmed via a separately-captured page-html-capture snapshot
+      // showing the real answer) while chatbot-interaction-perplexity simply
+      // never fires -- for every subsequent idle turn in a multi-turn
+      // session, not just the first, since startCapture() (and everything
+      // in it) only runs once per page load. ChatGPT/Gemini are not
+      // affected by this gap to the same degree -- their synchronous
+      // citation reads are far more likely to resolve within the same burst
+      // of mutations the answer's own rendering already caused, before the
+      // page goes quiet.
+      //
+      // Runs for the page's whole lifetime (bounded cost: a cheap
+      // processPage() call every 5s, which already guards itself against
+      // redundant concurrent runs via processInFlight), rather than firing
+      // once and stopping, so it keeps covering every later idle turn too.
+      if (this.parser?.name === 'perplexity') {
+        setInterval(() => {
+          void this.processPage().catch((error) => {
+            console.error('[LLM Chatbot Browser] Error in Perplexity idle-recheck pass:', error)
+          })
+        }, 5000)
+      }
+
       // Last-turn safety net: transmission here is otherwise purely
       // mutation-driven (no periodic timer), which is fine while the page
       // keeps mutating but leaves the FINAL turn of a session stranded if
