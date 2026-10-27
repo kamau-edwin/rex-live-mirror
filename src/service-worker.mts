@@ -15,8 +15,21 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
   private transmittedQaHashesWithSources: Set<string> = new Set() // Track which Q&A hashes were transmitted with sources
   private readonly QA_HASH_STORAGE_KEY: string = 'llm_transmitted_qa_hashes'
   private readonly QA_HASH_MAX_SIZE: number = 1000
-  private pendingQuestionByConversation: Map<string, any> = new Map()
-  private questionTimestamps: Map<string, number> = new Map() // Track when questions were added (for cleanup)
+  // FIFO queue per conversation, not a single slot: a participant asking a
+  // follow-up before the previous turn's (often slower, async-source-
+  // extraction) response has resolved used to have its question silently
+  // overwrite the still-unanswered previous one here, since Perplexity
+  // reuses the same conversation_id for every turn in one session.
+  // Confirmed live (2026-10-27): turn 1's response arrived ~90s after turn
+  // 2's question had already overwritten this map's single slot for their
+  // shared conversation id, so turn 1's real, fully-extracted response got
+  // paired with turn 2's question text instead -- both interactions landed
+  // tagged with turn 2's question, and turn 1's own question never got a
+  // response at all. A response now always pairs with the OLDEST
+  // still-pending question for its conversation key, matching real
+  // question/response submission order.
+  private pendingQuestionByConversation: Map<string, any[]> = new Map()
+  private questionTimestamps: Map<string, number> = new Map() // Track when EACH question was added, keyed by its own interaction_id (falls back to conversationKey if absent)
   private pendingResponsesByConversation: Map<string, any[]> = new Map() // Track responses received before their questions
   private readonly ORPHANED_QUESTION_TIMEOUT_MS: number = 5 * 60 * 1000 // 5 minutes
   private readonly EARLY_RESPONSE_TIMEOUT_MS: number = 30 * 1000 // 30 seconds (wait for question to arrive)
@@ -319,10 +332,17 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
         this.generateFallbackConversationKey(interaction)
 
       if (interaction?.type === 'question') {
-        // Keep only the latest pending question per conversation and dispatch only with a response.
-        this.pendingQuestionByConversation.set(conversationKey, interaction)
-        this.questionTimestamps.set(conversationKey, Date.now()) // Track when this question was added
-        
+        // Queue this question behind any still-unanswered earlier ones for
+        // the same conversation, rather than replacing them -- see this
+        // field's own declaration comment for why a single slot silently
+        // mispairs a response with the wrong question whenever a follow-up
+        // is asked before the previous turn resolves.
+        const existingQueue = this.pendingQuestionByConversation.get(conversationKey) ?? []
+        existingQueue.push(interaction)
+        this.pendingQuestionByConversation.set(conversationKey, existingQueue)
+        const questionTimestampKey = interaction.interaction_id ?? conversationKey
+        this.questionTimestamps.set(questionTimestampKey, Date.now()) // Track when this question was added
+
         // Check if there are any early responses waiting for this question
         const earlyResponses = this.getAndCleanEarlyResponses(conversationKey)
         for (const earlyResponse of earlyResponses) {
@@ -339,7 +359,8 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
       }
 
       if (interaction?.type === 'response') {
-        let pendingQuestion = this.pendingQuestionByConversation.get(conversationKey)
+        let pendingQueue = this.pendingQuestionByConversation.get(conversationKey)
+        let pendingQuestion = pendingQueue && pendingQueue.length > 0 ? pendingQueue[0] : undefined
         let matchedConversationKey = conversationKey
 
         // Some platforms (confirmed live on Perplexity) can replace their own
@@ -362,30 +383,55 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
         // separately-orphaned one.
         if (!pendingQuestion) {
           const sameSourceCandidates: string[] = []
-          for (const [key, question] of this.pendingQuestionByConversation.entries()) {
-            if (question?.source === interaction?.source) {
+          for (const [key, queue] of this.pendingQuestionByConversation.entries()) {
+            if (queue.length > 0 && queue[0]?.source === interaction?.source) {
               sameSourceCandidates.push(key)
             }
           }
 
           if (sameSourceCandidates.length === 1) {
             const candidateKey = sameSourceCandidates[0]
-            const candidateQuestion = this.pendingQuestionByConversation.get(candidateKey)
-            const candidateAgeMs = Date.now() - (this.questionTimestamps.get(candidateKey) ?? 0)
+            const candidateQueue = this.pendingQuestionByConversation.get(candidateKey)
+            const candidateQuestion = candidateQueue && candidateQueue.length > 0 ? candidateQueue[0] : undefined
+            const candidateTimestampKey = candidateQuestion?.interaction_id ?? candidateKey
+            const candidateAgeMs = Date.now() - (this.questionTimestamps.get(candidateTimestampKey) ?? 0)
 
-            if (candidateAgeMs <= this.ORPHANED_QUESTION_TIMEOUT_MS) {
+            if (candidateQuestion && candidateAgeMs <= this.ORPHANED_QUESTION_TIMEOUT_MS) {
               console.log(
                 `[LLM Chatbot] Response conversation id (${interaction.conversation_id}) did not match its `
                 + `question's id -- pairing with the sole pending ${interaction?.source} question instead `
                 + `(question conversation: ${candidateQuestion?.conversation_id})`
               )
               pendingQuestion = candidateQuestion
+              pendingQueue = candidateQueue
               matchedConversationKey = candidateKey
             }
           }
         }
 
         if (pendingQuestion) {
+          // Removes exactly the matched question from the front of its
+          // conversation's queue (never the whole conversation entry, which
+          // would also discard any OTHER still-unanswered questions queued
+          // behind it), and drops the map entry entirely once its queue is
+          // empty so sameSourceCandidates above does not keep matching a
+          // conversation with nothing left pending.
+          const dequeueMatchedQuestion = () => {
+            if (!pendingQueue) {
+              return
+            }
+            const idx = pendingQueue.indexOf(pendingQuestion)
+            if (idx !== -1) {
+              pendingQueue.splice(idx, 1)
+            }
+            if (pendingQueue.length === 0) {
+              this.pendingQuestionByConversation.delete(matchedConversationKey)
+            } else {
+              this.pendingQuestionByConversation.set(matchedConversationKey, pendingQueue)
+            }
+            this.questionTimestamps.delete(pendingQuestion.interaction_id ?? matchedConversationKey)
+          }
+
           // Validate timestamp ordering before correlation
           const validationResult = this.validateTimestampOrdering(pendingQuestion, interaction)
           if (!validationResult.isValid) {
@@ -401,13 +447,12 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
             // Allow re-transmission if sources were enriched after initial dispatch
             const hasNewSources = interaction.sources && interaction.sources.length > 0
             const hadSourcesOnInitialTransmit = this.transmittedQaHashesWithSources.has(qaHash)
-            
+
             if (!hasNewSources || hadSourcesOnInitialTransmit) {
               // Skip: either no new sources, or sources were already present before
               markTransmitted(pendingQuestion)
               markTransmitted(interaction)
-              this.pendingQuestionByConversation.delete(matchedConversationKey)
-              this.questionTimestamps.delete(matchedConversationKey) // Clean up timestamp tracking
+              dequeueMatchedQuestion()
               console.log(`[LLM Chatbot] Skipped duplicate qa_pair from ${interaction.source} (conversation: ${interaction.conversation_id})`)
               continue
             }
@@ -486,8 +531,7 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
 
           markTransmitted(pendingQuestion)
           markTransmitted(interaction)
-          this.pendingQuestionByConversation.delete(matchedConversationKey)
-          this.questionTimestamps.delete(matchedConversationKey) // Clean up timestamp tracking
+          dequeueMatchedQuestion()
           this.transmittedQaHashes.add(qaHash)
           
           // Track if this hash was transmitted with sources
@@ -531,33 +575,42 @@ class LLMChatbotServiceWorkerModule extends REXServiceWorkerModule {
    */
   private cleanupOrphanedQuestions(): void {
     const now = Date.now()
-    const conversationKeysToDelete: string[] = []
+    let removedCount = 0
 
-    for (const [conversationKey] of this.pendingQuestionByConversation.entries()) {
-      const questionAddedTime = this.questionTimestamps.get(conversationKey)
-      if (!questionAddedTime) {
-        continue
-      }
+    // Each queue can hold several still-unanswered questions (see
+    // pendingQuestionByConversation's own declaration comment) at different
+    // ages, so each one is timed out independently via its own
+    // interaction_id-keyed timestamp, rather than treating the whole
+    // conversation's queue as one unit.
+    for (const [conversationKey, queue] of this.pendingQuestionByConversation.entries()) {
+      const survivors = queue.filter((question) => {
+        const timestampKey = question?.interaction_id ?? conversationKey
+        const questionAddedTime = this.questionTimestamps.get(timestampKey)
+        if (!questionAddedTime) {
+          return true
+        }
 
-      const ageMs = now - questionAddedTime
-      if (ageMs > this.ORPHANED_QUESTION_TIMEOUT_MS) {
-        conversationKeysToDelete.push(conversationKey)
+        const ageMs = now - questionAddedTime
+        if (ageMs > this.ORPHANED_QUESTION_TIMEOUT_MS) {
+          this.questionTimestamps.delete(timestampKey)
+          removedCount += 1
+          console.log(
+            `[LLM Chatbot] Cleaned up orphaned question after ${this.ORPHANED_QUESTION_TIMEOUT_MS / 1000}s (conversation: ${conversationKey}, source: ${question?.source || 'unknown'})`
+          )
+          return false
+        }
+        return true
+      })
+
+      if (survivors.length === 0) {
+        this.pendingQuestionByConversation.delete(conversationKey)
+      } else if (survivors.length !== queue.length) {
+        this.pendingQuestionByConversation.set(conversationKey, survivors)
       }
     }
 
-    // Remove orphaned questions
-    for (const conversationKey of conversationKeysToDelete) {
-      const question = this.pendingQuestionByConversation.get(conversationKey)
-      this.pendingQuestionByConversation.delete(conversationKey)
-      this.questionTimestamps.delete(conversationKey)
-      
-      console.log(
-        `[LLM Chatbot] Cleaned up orphaned question after ${this.ORPHANED_QUESTION_TIMEOUT_MS / 1000}s (conversation: ${conversationKey}, source: ${question?.source || 'unknown'})`
-      )
-    }
-
-    if (conversationKeysToDelete.length > 0) {
-      console.log(`[LLM Chatbot] Orphaned question cleanup: removed ${conversationKeysToDelete.length} pending questions`)
+    if (removedCount > 0) {
+      console.log(`[LLM Chatbot] Orphaned question cleanup: removed ${removedCount} pending questions`)
     }
   }
 
