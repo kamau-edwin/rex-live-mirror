@@ -5,6 +5,7 @@ import { ChatGPTParser, type ChatGPTCompletionDecision } from './chatbots/chatgp
 import { GeminiParser } from './chatbots/gemini.js'
 import { ClaudeParser } from './chatbots/claude.js'
 import { pageHtmlCaptureModule as pageCaptureModule } from './page-html-capture/browser.mjs'
+import { isConversationPath, pastTurnIndexes, turnKeys } from './live-turns.mjs'
 
 export interface ExtractedSource {
   source_title: string
@@ -68,6 +69,20 @@ interface PendingSourceExtractionInfo {
 
 class LLMChatbotBrowserModule extends REXClientModule {
   private enabled: boolean = false
+  // Live-only capture (see live-turns.mts): unless allow_historical_sync is
+  // on, turns already on the page when a conversation is opened, or loaded
+  // by scrolling up, are skipped.
+  private allowHistoricalSync: boolean = false
+  private liveConversation: boolean = false
+  private lastConversationPath: string | null = null
+  private newChatActivityAtMs: number = 0
+  private pastTurnKeys: Set<string> = new Set()
+  private liveTurnKeys: Set<string> = new Set()
+  // A question submitted this long before the tab lands on a conversation
+  // URL (in memory, or in sessionStorage across a full-page navigation)
+  // makes that conversation live.
+  private readonly RECENT_SUBMIT_WINDOW_MS = 2 * 60 * 1000
+  private readonly RECENT_SUBMIT_STORAGE_KEY = 'llm_capture_recent_submit_v1'
   private parser: any = null
   // Raw resolved platform config for the active parser, kept around solely so
   // login_detection selectors are available to re-derive dom_login_state
@@ -291,6 +306,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
 
           if (llmConfig?.enabled) {
             this.enabled = true
+            this.allowHistoricalSync = llmConfig.allow_historical_sync === true
             this.batchSize = llmConfig.batch_size || 10
             this.transmissionInterval = llmConfig.transmission_interval_ms || 60000
 
@@ -728,6 +744,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
     this.lastSubmittedQuestionKey = dedupeKey
     this.lastSubmittedQuestionAtMs = now
     this.dispatchedQuestionKeys.add(dedupeKey)
+    this.markLiveSubmit(now)
 
     const submitListenerLoginStates = this.detectCurrentLoginStates(window.location.href)
     const payload = {
@@ -1499,6 +1516,78 @@ class LLMChatbotBrowserModule extends REXClientModule {
     return this.currentConversationId || this.localSessionId
   }
 
+  /** A question was submitted in this tab: the conversation it goes to is live. */
+  private markLiveSubmit(now: number): void {
+    this.liveConversation = true
+    this.newChatActivityAtMs = now
+
+    try {
+      window.sessionStorage.setItem(this.RECENT_SUBMIT_STORAGE_KEY, String(now))
+    } catch {
+      // sessionStorage unavailable: the in-memory state still covers SPA navigation.
+    }
+  }
+
+  private hasRecentSubmit(now: number): boolean {
+    let stored = 0
+
+    try {
+      stored = Number(window.sessionStorage.getItem(this.RECENT_SUBMIT_STORAGE_KEY) || 0)
+    } catch {
+      stored = 0
+    }
+
+    return now - Math.max(stored, this.newChatActivityAtMs) < this.RECENT_SUBMIT_WINDOW_MS
+  }
+
+  /**
+   * Decides whether the conversation on the page is live (see live-turns.mts)
+   * when the tab moves to another path. A new-chat page is live: whatever
+   * appears there is asked now. Landing on a conversation URL is live only
+   * when this tab just asked something (a new chat getting its URL, or a
+   * full-page navigation after submitting); otherwise an existing
+   * conversation was opened, and the turns on it are past.
+   */
+  private updateLiveConversation(hasMessages: boolean): void {
+    const now = Date.now()
+    const host = window.location.hostname
+    const path = window.location.pathname
+    const isConversation = isConversationPath(host, path)
+
+    if (path === this.lastConversationPath) {
+      if (!isConversation && hasMessages) {
+        this.newChatActivityAtMs = now
+      }
+      return
+    }
+
+    if (!isConversation) {
+      // A fresh new-chat page: earlier submits (in another conversation)
+      // must not make an old conversation opened next count as live.
+      this.liveConversation = true
+      this.newChatActivityAtMs = hasMessages ? now : 0
+      this.pastTurnKeys.clear()
+      this.liveTurnKeys.clear()
+
+      try {
+        window.sessionStorage.removeItem(this.RECENT_SUBMIT_STORAGE_KEY)
+      } catch {
+        // Nothing stored.
+      }
+    } else if (this.hasRecentSubmit(now)
+      && (this.lastConversationPath === null || !isConversationPath(host, this.lastConversationPath))) {
+      // A new chat just got its URL, or a full-page navigation followed a submit.
+      this.liveConversation = true
+    } else {
+      this.liveConversation = false
+      this.pastTurnKeys.clear()
+      this.liveTurnKeys.clear()
+    }
+
+    console.log(`[LLM Chatbot Browser] Conversation ${isConversation ? 'opened' : 'started'} (live: ${this.liveConversation})`)
+    this.lastConversationPath = path
+  }
+
   /**
    * Check for URL changes and update conversation ID
    * Server-provided ID always supersedes local session ID
@@ -1775,12 +1864,37 @@ class LLMChatbotBrowserModule extends REXClientModule {
         }
       }
 
+      // Past turns (see live-turns.mts) are left out of the capture below.
+      const liveOnly = !this.allowHistoricalSync
+      const keys = liveOnly ? turnKeys(newInteractions, this.PREFIX_LENGTH) : []
+      let pastIndexes = new Set<number>()
+
+      if (liveOnly) {
+        this.updateLiveConversation(hasMessagesNow)
+        pastIndexes = pastTurnIndexes(keys, (key) => this.pastTurnKeys.has(key) || this.liveTurnKeys.has(key), this.liveConversation)
+      }
+
+      let pastSkipped = 0
       let newCaptureCount = 0
       let updateCount = 0
       const interactionOrdinalByType = new Map<'question' | 'response', number>()
-      for (const interaction of newInteractions) {
+      for (const [index, interaction] of newInteractions.entries()) {
         const nextTurnNumber = (interactionOrdinalByType.get(interaction.type) || 0) + 1
         interactionOrdinalByType.set(interaction.type, nextTurnNumber)
+
+        if (liveOnly) {
+          const key = keys[index]
+
+          if (this.pastTurnKeys.has(key) || pastIndexes.has(index)) {
+            if (!this.pastTurnKeys.has(key)) {
+              this.pastTurnKeys.add(key)
+              pastSkipped++
+            }
+            continue
+          }
+
+          this.liveTurnKeys.add(key)
+        }
 
         const responseContainerRef: Element | undefined =
           interaction.type === 'response' && typeof this.parser.resolveContainer === 'function'
@@ -2310,6 +2424,10 @@ class LLMChatbotBrowserModule extends REXClientModule {
 
       if (newCaptureCount > 0 || updateCount > 0) {
         console.log(`[LLM Chatbot Browser] Captured ${newCaptureCount} new, ${updateCount} updates (${this.capturedPrefixes.size} total unique)`)
+      }
+
+      if (pastSkipped > 0) {
+        console.log(`[LLM Chatbot Browser] Skipped ${pastSkipped} past turns (live conversation: ${this.liveConversation})`)
       }
 
       // Mutation-driven pending promotion: re-evaluate pending entries whenever DOM changes.
