@@ -5,7 +5,7 @@ import { ChatGPTParser, type ChatGPTCompletionDecision } from './chatbots/chatgp
 import { GeminiParser } from './chatbots/gemini.js'
 import { ClaudeParser } from './chatbots/claude.js'
 import { pageHtmlCaptureModule as pageCaptureModule } from './page-html-capture/browser.mjs'
-import { isConversationPath, pastTurnIndexes, turnKeys } from './live-turns.mjs'
+import { conversationKey, conversationTransition, pastTurnIndexes, turnKeys } from './live-turns.mjs'
 
 export interface ExtractedSource {
   source_title: string
@@ -1541,29 +1541,30 @@ class LLMChatbotBrowserModule extends REXClientModule {
   }
 
   /**
-   * Decides whether the conversation on the page is live (see live-turns.mts)
-   * when the tab moves to another path. A new-chat page is live: whatever
-   * appears there is asked now. Landing on a conversation URL is live only
-   * when this tab just asked something (a new chat getting its URL, or a
-   * full-page navigation after submitting); otherwise an existing
-   * conversation was opened, and the turns on it are past.
+   * Keeps liveConversation up to date as the tab moves between URLs (see
+   * conversationTransition in live-turns.mts for what each move means).
    */
   private updateLiveConversation(hasMessages: boolean): void {
     const now = Date.now()
     const host = window.location.hostname
     const path = window.location.pathname
-    const isConversation = isConversationPath(host, path)
+    const onNewChatPage = conversationKey(host, path) === null
+    const transition = conversationTransition(host, this.lastConversationPath, path, hasMessages, () => this.hasRecentSubmit(now))
 
-    if (path === this.lastConversationPath) {
-      if (!isConversation && hasMessages) {
-        this.newChatActivityAtMs = now
-      }
+    this.lastConversationPath = path
+
+    // Messages on a new-chat page were asked there just now.
+    if (onNewChatPage && hasMessages) {
+      this.newChatActivityAtMs = now
+    }
+
+    if (transition === 'same' || transition === 'moved') {
       return
     }
 
-    if (!isConversation) {
-      // A fresh new-chat page: earlier submits (in another conversation)
-      // must not make an old conversation opened next count as live.
+    if (transition === 'new-chat') {
+      // Earlier submits (in another conversation) must not make an old
+      // conversation opened next count as live.
       this.liveConversation = true
       this.newChatActivityAtMs = hasMessages ? now : 0
       this.pastTurnKeys.clear()
@@ -1574,9 +1575,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
       } catch {
         // Nothing stored.
       }
-    } else if (this.hasRecentSubmit(now)
-      && (this.lastConversationPath === null || !isConversationPath(host, this.lastConversationPath))) {
-      // A new chat just got its URL, or a full-page navigation followed a submit.
+    } else if (transition === 'answered') {
       this.liveConversation = true
     } else {
       this.liveConversation = false
@@ -1584,8 +1583,7 @@ class LLMChatbotBrowserModule extends REXClientModule {
       this.liveTurnKeys.clear()
     }
 
-    console.log(`[LLM Chatbot Browser] Conversation ${isConversation ? 'opened' : 'started'} (live: ${this.liveConversation})`)
-    this.lastConversationPath = path
+    console.log(`[LLM Chatbot Browser] Conversation ${transition} (live: ${this.liveConversation})`)
   }
 
   /**

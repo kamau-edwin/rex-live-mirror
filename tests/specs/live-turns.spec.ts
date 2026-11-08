@@ -1,6 +1,9 @@
 import { test, expect } from '@playwright/test'
 
-import { isConversationPath, pastTurnIndexes, turnKeys, type PageTurn } from '../../src/live-turns.mjs'
+import { conversationKey, conversationTransition, isConversationPath, pastTurnIndexes, turnKeys, type PageTurn } from '../../src/live-turns.mjs'
+
+const UUID_A = '6a1b2c3d-1111-2222-3333-444455556666'
+const UUID_B = '7b2c3d4e-aaaa-bbbb-cccc-ddddeeeeffff'
 
 /**
  * Live-only capture: past turns on a chatbot page (an existing conversation
@@ -87,10 +90,74 @@ test.describe('live-turns', () => {
     expect(isConversationPath('www.perplexity.ai', '/')).toBe(false)
     expect(isConversationPath('www.perplexity.ai', '/search/new')).toBe(false)
     expect(isConversationPath('www.perplexity.ai', '/search/what-is-x-AbCdEf0123456789xyz')).toBe(true)
+    expect(isConversationPath('www.perplexity.ai', `/search/new/${UUID_A}`)).toBe(true)
+    expect(isConversationPath('www.perplexity.ai', `/session/${UUID_A}`)).toBe(true)
+    expect(isConversationPath('www.perplexity.ai', `/computer/tasks/${UUID_A}`)).toBe(true)
+    expect(isConversationPath('www.perplexity.ai', '/discover/you')).toBe(false)
+    expect(isConversationPath('www.perplexity.ai', '/spaces/my-space')).toBe(false)
+
+    expect(isConversationPath('chatgpt.com', `/c/WEB:${UUID_A}`)).toBe(false)
 
     expect(isConversationPath('claude.ai', '/new')).toBe(false)
     expect(isConversationPath('claude.ai', '/chat/6a1b2c3d-1111-2222-3333-444455556666')).toBe(true)
 
     expect(isConversationPath('example.com', '/c/6a1b2c3d-1111')).toBe(false)
+  })
+
+  test('the same conversation at another URL keeps its key', () => {
+    expect(conversationKey('www.perplexity.ai', `/search/new/${UUID_A}`)).toEqual(conversationKey('www.perplexity.ai', `/search/${UUID_A}`))
+    expect(conversationKey('www.perplexity.ai', '/search/old-slug-AbCdEf0123456789xyz'))
+      .toEqual(conversationKey('www.perplexity.ai', '/search/new-slug-AbCdEf0123456789xyz'))
+    expect(conversationKey('chatgpt.com', `/g/g-p-111-social/c/${UUID_A}`)).toEqual(conversationKey('chatgpt.com', `/g/g-p-222-content/c/${UUID_A}`))
+    expect(conversationKey('www.perplexity.ai', `/search/${UUID_A}`)).not.toEqual(conversationKey('www.perplexity.ai', `/search/${UUID_B}`))
+  })
+
+  test.describe('conversation transitions', () => {
+    const never = (): boolean => false
+    const always = (): boolean => true
+    const t = (host: string, last: string | null, path: string, messages: boolean, recent: () => boolean) =>
+      conversationTransition(host, last, path, messages, recent)
+
+    test('an existing conversation loaded in a tab is opened, not live', () => {
+      expect(t('gemini.google.com', null, '/app/0123abcd4567ef89', true, never)).toBe('opened')
+    })
+
+    test('switching to another existing conversation is opened, even right after asking', () => {
+      expect(t('gemini.google.com', '/app/0123abcd4567ef89', '/app/fedcba9876543210', true, always)).toBe('opened')
+      expect(t('www.perplexity.ai', `/session/${UUID_A}`, `/search/${UUID_B}`, true, always)).toBe('opened')
+    })
+
+    test('a new chat getting its URL after a question is answered (live)', () => {
+      expect(t('gemini.google.com', '/app', '/app/0123abcd4567ef89', true, always)).toBe('answered')
+      expect(t('chatgpt.com', '/', `/c/${UUID_A}`, true, always)).toBe('answered')
+      expect(t('www.perplexity.ai', '/', `/search/${UUID_A}`, true, always)).toBe('answered')
+      expect(t('www.perplexity.ai', '/', `/computer/tasks/${UUID_A}`, true, always)).toBe('answered')
+    })
+
+    test('a full-page navigation right after asking is answered (live)', () => {
+      expect(t('www.perplexity.ai', null, `/search/${UUID_A}`, true, always)).toBe('answered')
+    })
+
+    test('leaving a new-chat page for an old conversation without asking is opened', () => {
+      expect(t('chatgpt.com', '/', `/c/${UUID_A}`, true, never)).toBe('opened')
+    })
+
+    test('the same conversation moving URL carries over', () => {
+      expect(t('www.perplexity.ai', `/search/new/${UUID_A}`, `/search/${UUID_A}`, true, never)).toBe('moved')
+      expect(t('chatgpt.com', `/g/g-p-111-social/c/${UUID_A}`, `/g/g-p-222-content/c/${UUID_A}`, true, never)).toBe('moved')
+    })
+
+    test('a new chat with messages whose URL changes before its conversation URL carries over', () => {
+      expect(t('chatgpt.com', '/', `/c/WEB:${UUID_A}`, true, never)).toBe('moved')
+    })
+
+    test('a new-chat page is new-chat (live)', () => {
+      expect(t('chatgpt.com', `/c/${UUID_A}`, '/', false, never)).toBe('new-chat')
+      expect(t('www.perplexity.ai', null, '/', false, never)).toBe('new-chat')
+    })
+
+    test('an unchanged path is same', () => {
+      expect(t('chatgpt.com', `/c/${UUID_A}`, `/c/${UUID_A}`, true, never)).toBe('same')
+    })
   })
 })
